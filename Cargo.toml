@@ -1,0 +1,39 @@
+[package]
+name = "img2ufo"
+version = "0.1.0"
+edition = "2021"
+description = "Convert a type specimen image to a Google Fonts-compliant UFO font source"
+license = "MIT"
+authors = ["Eli Heuer"]
+repository = "https://github.com/eliheuer/img2ufo"
+
+[[bin]]
+name = "img2ufo"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+
+# UFO font format
+norad = "0.16"
+
+# Serialization (for img2glyph manifest.json)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Temp directory management
+tempfile = "3"
+
+# Bezier tracing library (img2bez)
+img2bez = { path = "../img2bez" }
+
+# Bezier math (must match img2bez's kurbo version)
+kurbo = "0.13"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
