@@ -1,0 +1,22 @@
+{
+  "name": "specimen-001",
+  "description": "Bold serif type specimen, photographed from print",
+  "source_file": "source.png",
+  "font_metrics": {
+    "units_per_em": 1000,
+    "ascender": 800,
+    "descender": -200,
+    "x_height": 500,
+    "cap_height": 700
+  },
+  "segmentation": {
+    "min_area": 2000,
+    "max_area": 50000,
+    "block_radius": 15,
+    "padding": 10
+  },
+  "glyphs_labeled": 75,
+  "glyphs_corrected": 0,
+  "date_created": "2026-04-03",
+  "notes": "Hand-correct pipeline-output.ufo in a font editor and save as expected.ufo"
+}
