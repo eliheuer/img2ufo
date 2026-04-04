@@ -1,8 +1,10 @@
+mod gasp;
+mod gf_latin_core;
 mod manifest;
 mod pipeline;
 mod ufo_builder;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -40,24 +42,24 @@ struct Args {
     #[arg(long, default_value = "Regular")]
     style_name: String,
 
-    /// Units per em
-    #[arg(long, default_value_t = 1000)]
+    /// Units per em (1024 = power-of-2 grid)
+    #[arg(long, default_value_t = 1024)]
     upm: u32,
 
     /// Ascender value in font units
-    #[arg(long, default_value_t = 800)]
+    #[arg(long, default_value_t = 832)]
     ascender: i32,
 
     /// Descender value in font units (typically negative)
-    #[arg(long, default_value_t = -200)]
+    #[arg(long, default_value_t = -256)]
     descender: i32,
 
     /// x-height in font units
-    #[arg(long, default_value_t = 500)]
+    #[arg(long, default_value_t = 576)]
     x_height: i32,
 
     /// Cap-height in font units
-    #[arg(long, default_value_t = 700)]
+    #[arg(long, default_value_t = 768)]
     cap_height: i32,
 
     /// Curve-fitting accuracy for bezier tracing (lower = more accurate, more points)
@@ -72,8 +74,8 @@ struct Args {
     #[arg(long, default_value_t = 0.80)]
     alphamax: f64,
 
-    /// Coordinate snapping grid (0 = off)
-    #[arg(long, default_value_t = 0)]
+    /// Coordinate snapping grid (2 = even integers for power-of-2 grid; 0 = off)
+    #[arg(long, default_value_t = 2)]
     grid: i32,
 
     /// Minimum glyph area in pixels — raise to filter scan noise
@@ -83,6 +85,10 @@ struct Args {
     /// Maximum glyph area in pixels — lower to exclude large page elements
     #[arg(long, default_value_t = 50000)]
     max_area: u32,
+
+    /// Compile the UFO to TTF using fontc (requires fontc on PATH)
+    #[arg(long)]
+    compile: bool,
 
     /// Verbosity
     #[arg(short, long)]
@@ -95,6 +101,10 @@ fn main() -> Result<()> {
     if args.verbose {
         eprintln!("img2ufo: processing {:?}", args.input);
     }
+
+    let output_path = args.output.clone();
+    let compile = args.compile;
+    let verbose = args.verbose;
 
     let config = pipeline::PipelineConfig {
         input: args.input,
@@ -117,6 +127,34 @@ fn main() -> Result<()> {
     };
 
     pipeline::run(config)?;
+
+    if compile {
+        // Derive TTF filename: MyFont-Regular.ufo → MyFont-Regular.ttf
+        let ttf_path = output_path.with_extension("ttf");
+        if verbose {
+            eprintln!("img2ufo: compiling {:?} → {:?}", output_path, ttf_path);
+        }
+
+        let status = std::process::Command::new("fontc")
+            .arg(&output_path)
+            .arg("-o")
+            .arg(&ttf_path)
+            .status()
+            .with_context(|| {
+                "Failed to run `fontc` — is it installed?\n\
+                 Install it with: cargo install fontc"
+            })?;
+        if !status.success() {
+            anyhow::bail!("fontc exited with status {}", status);
+        }
+
+        // Patch in the gasp table (required by Google Fonts for unhinted fonts).
+        gasp::fix_gasp(&ttf_path)?;
+
+        if args.verbose {
+            eprintln!("img2ufo: compiled {:?} (gasp table added)", ttf_path);
+        }
+    }
 
     if args.verbose {
         eprintln!("img2ufo: done");

@@ -25,6 +25,12 @@ norad = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Plist values for lib.plist
+plist = "1"
+
+# Image dimensions (for recording image→font transform)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Temp directory management
 tempfile = "3"
 

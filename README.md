@@ -45,6 +45,25 @@ img2ufo -i test.png -o MyFont-Regular.ufo --glyph-dir glyphs/ \
     --accuracy 2.0 --smooth-iterations 1 --alphamax 0.80
 ```
 
+### Compile to TTF
+
+Add `--compile` to build a TTF with fontc in one shot (requires [fontc](https://github.com/googlefonts/fontc) on PATH):
+
+```bash
+img2ufo -i test.png -o MyFont-Regular.ufo --glyph-dir glyphs/ \
+    --family-name "My Font" --min-area 2000 --compile
+```
+
+### Edit with background images
+
+Open the output in [Runebender](https://github.com/linebender/runebender) with the source glyph PNGs as background references for tracing:
+
+```bash
+runebender MyFont-Regular.ufo --glyph-images glyphs/
+```
+
+Each glyph automatically gets its source image loaded as a locked background, scaled to fit the ascender-to-descender range. This lets you correct outlines by tracing over the original scan.
+
 ---
 
 ## How it works
