@@ -124,8 +124,8 @@ Append to `references/specimen-001/results.tsv`:
 
 - `autoresearch/run_scan_experiment.sh`
 - `autoresearch/program.md`
-- `references/*/expected.ufo/` (ground truth)
-- `references/*/input/` (input data)
+- `references/*/output.ufo/` (ground truth)
+- `references/*/input-glyphs/` (input data)
 
 ## What you SHOULD NOT change
 

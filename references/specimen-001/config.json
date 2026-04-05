@@ -1,7 +1,7 @@
 {
   "name": "specimen-001",
   "description": "Bold serif type specimen, photographed from print",
-  "source_file": "source.png",
+  "source_file": "input.png",
   "font_metrics": {
     "units_per_em": 1000,
     "ascender": 800,

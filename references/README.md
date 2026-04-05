@@ -30,12 +30,12 @@ The goal: get everything green. Green glyphs survive regeneration, so you never 
 
 ## Setting Up a New Specimen
 
-1. Copy your scan to `references/specimen-NNN/source.png`
-2. Edit `metadata.json` (description, min_area for your scan quality)
+1. Copy your scan to `references/specimen-NNN/input.png`
+2. Edit `config.json` (description, min_area for your scan quality)
 3. Run `./train.sh specimen-NNN` — segments the image
 4. Label the glyphs:
-   - Use Claude Code to read the PNGs and write `assignments.json`
-   - Or write `assignments.json` manually
+   - Use Claude Code to read the PNGs and write `unicode-labels.json`
+   - Or write `unicode-labels.json` manually
 5. Run `./train.sh specimen-NNN --rebuild`
 6. Open: `./train.sh specimen-NNN --open`
 7. Hand-draw 5 key glyphs: **H, O, n, o, zero** — mark them green
@@ -55,11 +55,11 @@ Once these 5 are green, autoresearch has enough signal to optimize the rest.
 
 ```
 specimen-001/
-  source.png              # Original scan (checked in)
-  metadata.json           # Font metrics + config (checked in)
-  assignments.json        # Unicode labels (checked in)
-  expected.ufo/           # Working font with color-coded glyphs (checked in)
-  input/                  # Cropped glyph PNGs (gitignored, regenerated)
+  input.png              # Original scan (checked in)
+  config.json           # Font metrics + config (checked in)
+  unicode-labels.json        # Unicode labels (checked in)
+  output.ufo/           # Working font with color-coded glyphs (checked in)
+  input-glyphs/                  # Cropped glyph PNGs (gitignored, regenerated)
   comparison/             # Autoresearch diffs (gitignored, regenerated)
 ```
 
@@ -68,14 +68,14 @@ specimen-001/
 | # | Description | Status |
 |---|-------------|--------|
 | specimen-001 | Bold serif (test.png) | Active |
-| specimen-002 | (empty) | Needs source.png |
-| specimen-003 | (empty) | Needs source.png |
-| specimen-004 | (empty) | Needs source.png |
-| specimen-005 | (empty) | Needs source.png |
-| specimen-006 | (empty) | Needs source.png |
-| specimen-007 | (empty) | Needs source.png |
-| specimen-008 | (empty) | Needs source.png |
-| specimen-009 | (empty) | Needs source.png |
+| specimen-002 | (empty) | Needs input.png |
+| specimen-003 | (empty) | Needs input.png |
+| specimen-004 | (empty) | Needs input.png |
+| specimen-005 | (empty) | Needs input.png |
+| specimen-006 | (empty) | Needs input.png |
+| specimen-007 | (empty) | Needs input.png |
+| specimen-008 | (empty) | Needs input.png |
+| specimen-009 | (empty) | Needs input.png |
 
 ## Autoresearch
 

@@ -158,7 +158,7 @@ for entry in &manifest.glyphs {
 
 **img2bez** — no changes needed. Already supports per-glyph `target_height` and `y_offset`.
 
-**img2glyph** — ideally add `source_width` and `source_height` to the manifest so we know the full image dimensions for clamping calculations. Otherwise we can read them from `source.png`.
+**img2glyph** — ideally add `source_width` and `source_height` to the manifest so we know the full image dimensions for clamping calculations. Otherwise we can read them from `input.png`.
 
 ### What about the background images in Runebender?
 

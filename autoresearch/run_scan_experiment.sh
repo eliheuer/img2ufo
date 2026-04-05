@@ -28,7 +28,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-# Reference set directory. Must contain input/*.png and expected.ufo/
+# Reference set directory. Must contain input-glyphs/*.png and output.ufo/
 REFERENCE_SET="${REFERENCE_SET:-$REPO_DIR/references/specimen-001}"
 
 # Path to img2bez repo (sibling directory by default)
@@ -43,8 +43,8 @@ fi
 # ── Validate prerequisites ────────────────────────────────────────────────────
 
 INPUT_DIR="$REFERENCE_SET/input"
-EXPECTED_UFO="$REFERENCE_SET/expected.ufo"
-METADATA="$REFERENCE_SET/metadata.json"
+EXPECTED_UFO="$REFERENCE_SET/output.ufo"
+METADATA="$REFERENCE_SET/config.json"
 WORK_DIR="$REFERENCE_SET/comparison"
 
 if [ ! -d "$INPUT_DIR" ]; then
@@ -53,17 +53,17 @@ if [ ! -d "$INPUT_DIR" ]; then
 fi
 
 if [ ! -d "$EXPECTED_UFO" ]; then
-    echo "ERROR: expected.ufo not found at $EXPECTED_UFO"
+    echo "ERROR: output.ufo not found at $EXPECTED_UFO"
     echo ""
     echo "To create it:"
     echo "  1. Open $REFERENCE_SET/pipeline-output.ufo in a font editor"
-    echo "  2. Correct the outlines to match source.png"
+    echo "  2. Correct the outlines to match input.png"
     echo "  3. Save as $EXPECTED_UFO"
     exit 1
 fi
 
 if [ ! -f "$METADATA" ]; then
-    echo "ERROR: metadata.json not found at $METADATA"
+    echo "ERROR: config.json not found at $METADATA"
     exit 1
 fi
 

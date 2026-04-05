@@ -53,11 +53,11 @@ references/
   specimen-009/          # Display/decorative
 
 Each contains:
-  source.png             # Original scan
-  metadata.json          # Font metrics
-  assignments.json       # Unicode labels
-  input/                 # Cropped glyph PNGs (gitignored)
-  expected.ufo/          # The working font (with color-coded glyphs)
+  input.png             # Original scan
+  config.json          # Font metrics
+  unicode-labels.json       # Unicode labels
+  input-glyphs/                 # Cropped glyph PNGs (gitignored)
+  output.ufo/          # The working font (with color-coded glyphs)
     glyphs/
       H_.glif            # markColor: 0,1,0,1 (green = hand-drawn)
       O_.glif            # markColor: 0,1,0,1 (green = hand-drawn)
@@ -113,7 +113,7 @@ The LLM driving autoresearch can read the color distribution:
 # Count colors in the font
 python3 -c "
 import plistlib, os
-ufo = 'references/specimen-001/expected.ufo'
+ufo = 'references/specimen-001/output.ufo'
 colors = {}
 for f in os.listdir(f'{ufo}/glyphs'):
     if not f.endswith('.glif'): continue
@@ -129,15 +129,15 @@ print(colors)  # {'green': 5, 'red': 70, 'orange': 0, 'yellow': 0}
 
 ```bash
 # 1. Segment and label
-img2glyph process specimen.png --output input/ --min-area 2000
+img2glyph process specimen.png --output input-glyphs/ --min-area 2000
 # (use Claude to label)
-img2glyph label input/manifest.json --assignments assignments.json
+img2glyph label input-glyphs/manifest.json --assignments unicode-labels.json
 
 # 2. Generate initial UFO (everything red)
-img2ufo -i specimen.png -o expected.ufo --glyph-dir input/
+img2ufo -i specimen.png -o output.ufo --glyph-dir input-glyphs/
 
 # 3. Open in Runebender and hand-draw 3-5 key glyphs
-runebender expected.ufo --glyph-images input/
+runebender output.ufo --glyph-images input-glyphs/
 # Draw: H, O, n, o, zero — mark green when done
 
 # 4. Run autoresearch overnight
@@ -145,7 +145,7 @@ runebender expected.ufo --glyph-images input/
 ./autoresearch/run_scan_experiment.sh > run.log 2>&1
 
 # 5. Regenerate — greens survive, reds get new pipeline output
-img2ufo -i specimen.png -o expected.ufo --glyph-dir input/
+img2ufo -i specimen.png -o output.ufo --glyph-dir input-glyphs/
 # Open in Runebender, review, promote improving glyphs to orange/yellow/green
 ```
 

@@ -1,0 +1,20 @@
+{
+  "name": "specimen-007",
+  "description": "",
+  "source_file": "input.png",
+  "font_metrics": {
+    "units_per_em": 1024,
+    "ascender": 832,
+    "descender": -256,
+    "x_height": 576,
+    "cap_height": 768
+  },
+  "segmentation": {
+    "min_area": 2000,
+    "max_area": 50000
+  },
+  "glyphs_labeled": 0,
+  "glyphs_corrected": 0,
+  "date_created": "2026-04-04",
+  "notes": "Add input.png and run: ./train.sh specimen-007"
+}

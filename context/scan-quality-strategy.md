@@ -28,13 +28,13 @@ Five failure modes, each traceable to a specific stage:
 img2ufo/references/
   README.md                      # This section, expanded
   specimen-001/                  # One directory per specimen
-    source.png                   # Original full-page scan
-    metadata.json                # Font metrics + provenance
-    input/                       # Cropped glyph PNGs (from img2glyph)
+    input.png                   # Original full-page scan
+    config.json                # Font metrics + provenance
+    input-glyphs/                       # Cropped glyph PNGs (from img2glyph)
       A.png
       B.png
       ...
-    expected.ufo/                # Hand-corrected outlines (ground truth)
+    output.ufo/                # Hand-corrected outlines (ground truth)
       metainfo.plist
       fontinfo.plist
       glyphs/
@@ -49,13 +49,13 @@ img2ufo/references/
     results.tsv                  # Autoresearch results for this specimen
 ```
 
-### metadata.json
+### config.json
 
 ```json
 {
   "name": "specimen-001",
   "description": "Bold serif type specimen, photographed from print",
-  "source_file": "source.png",
+  "source_file": "input.png",
   "font_metrics": {
     "units_per_em": 1000,
     "ascender": 800,
@@ -80,26 +80,26 @@ img2ufo/references/
 
 **Step 1 — Segment and label (we've already done this for test.png):**
 ```bash
-img2glyph process source.png --output input/ --min-area 2000
-img2glyph label input/manifest.json --assignments assignments.json
+img2glyph process input.png --output input-glyphs/ --min-area 2000
+img2glyph label input-glyphs/manifest.json --assignments unicode-labels.json
 ```
 
 **Step 2 — Run pipeline to get initial UFO:**
 ```bash
-img2ufo -i source.png -o pipeline-output.ufo --glyph-dir input/
+img2ufo -i input.png -o pipeline-output.ufo --glyph-dir input/
 ```
 
 **Step 3 — Hand-correct in a font editor:**
 1. Open `pipeline-output.ufo` in RoboFont/Glyphs/FontForge
 2. For each glyph, correct the outlines to match the source image
-3. Save as `expected.ufo`
+3. Save as `output.ufo`
 
 **Step 4 — Verify the reference set works:**
 ```bash
 # From img2bez repo, trace one glyph and compare against reference:
-img2bez -i references/specimen-001/input/A.png \
+img2bez -i references/specimen-001/input-glyphs/A.png \
         -o /tmp/test.ufo -n A \
-        --reference references/specimen-001/expected.ufo/glyphs/A_.glif
+        --reference references/specimen-001/output.ufo/glyphs/A_.glif
 # Check the IoU and comparison images
 ```
 
@@ -143,8 +143,8 @@ set -euo pipefail
 
 REFERENCE_SET="${REFERENCE_SET:-references/specimen-001}"
 INPUT_DIR="$REFERENCE_SET/input"
-EXPECTED_UFO="$REFERENCE_SET/expected.ufo"
-METADATA="$REFERENCE_SET/metadata.json"
+EXPECTED_UFO="$REFERENCE_SET/output.ufo"
+METADATA="$REFERENCE_SET/config.json"
 WORK_DIR="$REFERENCE_SET/comparison"
 mkdir -p "$WORK_DIR"
 
@@ -152,7 +152,7 @@ mkdir -p "$WORK_DIR"
 (cd ../img2bez && cargo build --release)
 IMG2BEZ="../img2bez/target/release/img2bez"
 
-# Read font metrics from metadata.json
+# Read font metrics from config.json
 TARGET_HEIGHT=$(python3 -c "
 import json; m=json.load(open('$METADATA'))['font_metrics']
 print(m['ascender'] - m['descender'])")
@@ -168,7 +168,7 @@ for png in "$INPUT_DIR"/*.png; do
     # Skip unlabeled glyphs (glyph_NNNN pattern)
     [[ "$name" =~ ^glyph_ ]] && continue
 
-    # Find matching .glif in expected.ufo
+    # Find matching .glif in output.ufo
     glif=$(python3 -c "
 import plistlib, sys
 p = plistlib.load(open('$EXPECTED_UFO/glyphs/contents.plist', 'rb'))
@@ -246,7 +246,7 @@ The metric comes from `run_scan_experiment.sh` in `img2ufo/autoresearch/`.
 **Visual comparison (Claude Code with vision):**
 ```
 Read the file references/specimen-001/comparison/A_comparison.png
-and references/specimen-001/input/A.png
+and references/specimen-001/input-glyphs/A.png
 
 Describe what's wrong with the traced output compared to the source.
 What specific changes to the tracing algorithm would improve this glyph?
@@ -285,18 +285,18 @@ mkdir -p references/specimen-001/input
 mkdir -p references/specimen-001/comparison
 
 # Copy current segmented glyphs as input
-cp glyphs/*.png references/specimen-001/input/
-cp test.png references/specimen-001/source.png
+cp glyphs/*.png references/specimen-001/input-glyphs/
+cp test.png references/specimen-001/input.png
 
 # Copy current pipeline output as starting point for correction
 cp -r test_output.ufo references/specimen-001/pipeline-output.ufo
 
-# Create metadata.json
-cat > references/specimen-001/metadata.json << 'EOF'
+# Create config.json
+cat > references/specimen-001/config.json << 'EOF'
 {
   "name": "specimen-001",
   "description": "Bold serif type specimen from test.png",
-  "source_file": "source.png",
+  "source_file": "input.png",
   "font_metrics": {
     "units_per_em": 1000,
     "ascender": 800,
@@ -315,12 +315,12 @@ cat > references/specimen-001/metadata.json << 'EOF'
 EOF
 
 # Now open pipeline-output.ufo in a font editor,
-# correct the outlines, and save as expected.ufo:
-# cp -r references/specimen-001/pipeline-output.ufo references/specimen-001/expected.ufo
-# open references/specimen-001/expected.ufo  # in your font editor
+# correct the outlines, and save as output.ufo:
+# cp -r references/specimen-001/pipeline-output.ufo references/specimen-001/output.ufo
+# open references/specimen-001/output.ufo  # in your font editor
 ```
 
-After you correct outlines for even a handful of glyphs and save as `expected.ufo`, the autoresearch loop can start measuring and optimizing overnight.
+After you correct outlines for even a handful of glyphs and save as `output.ufo`, the autoresearch loop can start measuring and optimizing overnight.
 
 ---
 

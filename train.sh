@@ -9,10 +9,10 @@
 # Green glyphs are preserved on rebuild — only red/uncolored glyphs get regenerated.
 #
 # Setup for a new specimen:
-#   1. Copy your scan to references/specimen-NNN/source.png
-#   2. Edit references/specimen-NNN/metadata.json (description, min_area, etc.)
+#   1. Copy your scan to references/specimen-NNN/input.png
+#   2. Edit references/specimen-NNN/config.json (description, min_area, etc.)
 #   3. Run: ./train.sh specimen-NNN
-#   4. Use Claude Code to create assignments.json (LLM reads glyph PNGs)
+#   4. Use Claude Code to create unicode-labels.json (LLM reads glyph PNGs)
 #   5. Run: ./train.sh specimen-NNN --rebuild
 #   6. Open in Runebender: ./train.sh specimen-NNN --open
 #   7. Hand-draw 5 key glyphs (H, O, n, o, zero), mark them green
@@ -48,17 +48,17 @@ if [ ! -d "$REF_DIR" ]; then
     exit 1
 fi
 
-SOURCE="$REF_DIR/source.png"
+SOURCE="$REF_DIR/input.png"
 INPUT_DIR="$REF_DIR/input"
-ASSIGNMENTS="$REF_DIR/assignments.json"
-METADATA="$REF_DIR/metadata.json"
-UFO="$REF_DIR/expected.ufo"
+ASSIGNMENTS="$REF_DIR/unicode-labels.json"
+METADATA="$REF_DIR/config.json"
+UFO="$REF_DIR/output.ufo"
 
 # Read font metrics from metadata.
 FAMILY_NAME=$(python3 -c "import json; print(json.load(open('$METADATA')).get('description','Untitled') or 'Untitled')")
 MIN_AREA=$(python3 -c "import json; print(json.load(open('$METADATA'))['segmentation']['min_area'])")
 
-# ── Step 1: Segment (skip if --rebuild or input/ already has manifest) ────────
+# ── Step 1: Segment (skip if --rebuild or input-glyphs/ already has manifest) ────────
 
 if [ "$REBUILD" = false ]; then
     if [ ! -f "$SOURCE" ]; then
