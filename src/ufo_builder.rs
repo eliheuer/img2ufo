@@ -151,8 +151,24 @@ impl SpecimenMetrics {
     }
 }
 
+/// Mark color values matching Runebender's palette (theme::mark::RGBA_STRINGS).
+/// Green = hand-corrected, keep on rebuild.
+const GREEN_MARK_PREFIX: &str = "0.3,0.7,0.3";
+/// Red = pipeline output, will be regenerated on next rebuild.
+const RED_MARK: &str = "1,0.3,0.3,1";
+
 /// Build a Google Fonts-compliant UFO from the segmented glyph PNGs.
+///
+/// If the output UFO already exists, green-marked glyphs are preserved
+/// (not overwritten). All newly traced glyphs are marked red.
 pub fn build(config: &PipelineConfig, manifest: &Manifest, glyph_dir: &Path) -> Result<()> {
+    // Load existing UFO if present (to preserve green glyphs).
+    let existing_font = if config.output.exists() {
+        Font::load(&config.output).ok()
+    } else {
+        None
+    };
+
     let mut font = Font::new();
 
     apply_font_info(&mut font.font_info, config);
@@ -191,6 +207,32 @@ pub fn build(config: &PipelineConfig, manifest: &Manifest, glyph_dir: &Path) -> 
                 eprintln!("ufo_builder: skipping unlabeled {:?}", entry.file);
             }
             continue;
+        }
+
+        let glyph_name = entry
+            .glyph_name
+            .as_deref()
+            .unwrap_or(entry.id.as_str());
+
+        // Preserve green glyphs: if the existing UFO has this glyph marked
+        // green, keep it instead of re-tracing.
+        if let Some(ref existing) = existing_font {
+            if let Some(existing_glyph) = existing.default_layer().get_glyph(glyph_name) {
+                let mark = existing_glyph
+                    .lib
+                    .get("public.markColor")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("");
+                if mark.starts_with(GREEN_MARK_PREFIX) {
+                    // Green — keep the hand-drawn glyph.
+                    font.default_layer_mut().insert_glyph(existing_glyph.clone());
+                    glyph_order.push(glyph_name.to_string());
+                    if config.verbose {
+                        eprintln!("ufo_builder: keeping green {:?}", glyph_name);
+                    }
+                    continue;
+                }
+            }
         }
 
         let png_path = glyph_dir.join(&entry.file);
@@ -306,6 +348,12 @@ fn trace_and_add_glyph(
             glyph.contours.push(contour);
         }
     }
+
+    // Mark as red (pipeline output, will be regenerated on next rebuild).
+    glyph.lib.insert(
+        "public.markColor".into(),
+        Value::String(RED_MARK.into()),
+    );
 
     font.default_layer_mut().insert_glyph(glyph);
 
@@ -439,7 +487,9 @@ fn kurbo_path_to_norad_contour(path: &kurbo::BezPath) -> Option<Contour> {
 
 #[inline]
 fn cp(p: kurbo::Point, typ: PointType) -> ContourPoint {
-    ContourPoint::new(p.x, p.y, typ, false, None, None)
+    // On-curve points are smooth (continuous tangent at each point).
+    let smooth = matches!(typ, PointType::Curve | PointType::QCurve);
+    ContourPoint::new(p.x, p.y, typ, smooth, None, None)
 }
 
 /// Populate `FontInfo` with Google Fonts-required fields.
