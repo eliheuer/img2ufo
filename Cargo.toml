@@ -18,27 +18,24 @@ clap = { version = "4", features = ["derive"] }
 # Error handling
 anyhow = "1"
 
-# UFO font format
-norad = "0.16"
-
-# Serialization (for img2glyph manifest.json)
+# Serialization (for img2glyph manifest.json + labels + fontspector report)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Plist values for lib.plist
+# Plist values for lib.plist (version unifies with norad's)
 plist = "1"
-
-# Image dimensions (for recording image→font transform)
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Temp directory management
 tempfile = "3"
 
-# Bezier tracing library (img2bez)
-img2bez = { path = "../img2bez" }
-
-# Bezier math (must match img2bez's kurbo version)
-kurbo = "0.13"
+# Bezier tracing library (img2bez). norad and kurbo come via its re-exports
+# so the versions always match.
+#
+# NOTE: pinned to the last commit that compiles — img2bez HEAD (fe180b8
+# "Random slop") has a build error in src/ml/heads/mod.rs (missing
+# site_v1::ROOTS_CORNER2). Switch back to a plain path dependency
+# (`img2bez = { path = "../img2bez" }`) once img2bez HEAD builds again.
+img2bez = { git = "file:///Users/eli/GH/repos/img2bez", rev = "2eed2fadd3c170e447d7c53246740fb148e77c12" }
 
 [dev-dependencies]
 assert_cmd = "2"

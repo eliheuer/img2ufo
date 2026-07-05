@@ -1,8 +1,28 @@
-/// Google Fonts Latin Core glyphset — the minimum required character set.
-///
-/// 309 encoded codepoints. Glyphs traced from the specimen get real outlines;
-/// missing ones are added as empty placeholders so fontc produces a valid font
-/// and fontspector passes the glyph coverage check.
+//! Google Fonts Latin Core glyphset — the minimum required character set.
+//!
+//! Used to (a) map labeled codepoints to production glyph names and (b)
+//! report specimen coverage against the GF onboarding minimum. Missing
+//! glyphs are reported, never synthesized: per the GF guide they must be
+//! designed by a human.
+
+/// Nice-name for a codepoint, if it is part of GF Latin Core.
+pub fn name_for_codepoint(cp: u32) -> Option<&'static str> {
+    GLYPHSET
+        .iter()
+        .find(|&&(c, _)| c == cp)
+        .map(|&(_, name)| name)
+}
+
+/// Coverage of the glyphset by a set of encoded codepoints:
+/// `(covered, total, missing_names)`.
+pub fn coverage(encoded: &std::collections::HashSet<u32>) -> (usize, usize, Vec<&'static str>) {
+    let missing: Vec<&'static str> = GLYPHSET
+        .iter()
+        .filter(|&&(cp, _)| !encoded.contains(&cp))
+        .map(|&(_, name)| name)
+        .collect();
+    (GLYPHSET.len() - missing.len(), GLYPHSET.len(), missing)
+}
 
 /// (codepoint, glyph_name) pairs for all GF Latin Core required characters.
 pub const GLYPHSET: &[(u32, &str)] = &[

@@ -1,14 +1,35 @@
+//! Assemble a Google Fonts-compliant UFO from segmented glyph PNGs.
+//!
+//! Uses img2bez's trace/place split: each crop is traced to a neutral
+//! outline, then placed deterministically into the font's coordinate
+//! system from specimen-level metrics (uniform scale + per-row baselines
+//! derived from the labeled uppercase letters).
+
 use crate::gf_latin_core;
 use crate::manifest::{GlyphEntry, Manifest};
 use crate::pipeline::PipelineConfig;
+use crate::spacing::{self, SpacingDefaults};
 use anyhow::{Context, Result};
-use img2bez::{trace, TracingConfig};
-use kurbo::PathEl;
-use norad::{Contour, ContourPoint, Font, FontInfo, Glyph, PointType};
-use norad::fontinfo::NonNegativeIntegerOrFloat;
+use img2bez::norad::fontinfo::{NonNegativeIntegerOrFloat, StyleMapStyle};
+use img2bez::norad::{Contour, ContourPoint, Font, FontInfo, Glyph, PointType};
+use img2bez::{trace_place, PlacementOptions, Sidebearings, TargetBand, TraceOptions};
 use plist::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// What the build produced, for the pipeline's report.
+pub struct BuildReport {
+    /// Glyphs traced from the specimen this run.
+    pub traced: usize,
+    /// Hand-corrected (green-marked) glyphs preserved from the existing UFO.
+    pub green_kept: usize,
+    /// Glyphs included without a codepoint (excluded from the cmap).
+    pub unlabeled: usize,
+    /// Crops that failed to trace: (file, error).
+    pub failed: Vec<(String, String)>,
+    /// Encoded codepoints present in the cmap.
+    pub encoded: HashSet<u32>,
+}
 
 // ============================================================================
 // Specimen-level metrics: uniform scale + per-row baseline
@@ -20,54 +41,47 @@ struct SpecimenMetrics {
     uniform_scale: f64,
     /// Baseline y-coordinate (in source image pixels, y-down) per row.
     baselines: HashMap<usize, f64>,
-    /// Padding used when cropping (needed to compute crop bounds).
-    padding: u32,
 }
 
 impl SpecimenMetrics {
     /// Analyze the manifest to compute a uniform scale and per-row baselines.
-    fn from_manifest(manifest: &Manifest, cap_height: f64, padding: u32) -> Self {
-        // Find uppercase letters (A-Z) to determine scale and baselines.
+    fn from_manifest(manifest: &Manifest, cap_height: f64) -> Self {
+        // Uppercase letters (A-Z) determine scale and baselines.
         let uppercase: Vec<&GlyphEntry> = manifest
             .glyphs
             .iter()
-            .filter(|g| {
-                g.unicode.as_deref().map_or(false, |u| {
-                    let cp = u32::from_str_radix(u.trim_start_matches("U+"), 16).unwrap_or(0);
-                    (0x0041..=0x005A).contains(&cp) // A-Z
-                })
-            })
+            .filter(|g| matches!(g.codepoint(), Some('A'..='Z')))
             .collect();
 
-        // Uniform scale: tallest uppercase height → cap_height.
-        // Prefer H (no overshoot) if available, else use the median uppercase height.
+        // Uniform scale: reference uppercase height -> cap_height.
+        // Prefer H (flat top and bottom, no overshoot), else the median.
         let reference_height = uppercase
             .iter()
-            .find(|g| g.glyph_name.as_deref() == Some("H"))
+            .find(|g| g.codepoint() == Some('H'))
             .map(|g| g.bbox.h as f64)
             .unwrap_or_else(|| {
-                let mut heights: Vec<f64> = uppercase.iter().map(|g| g.bbox.h as f64).collect();
+                let mut heights: Vec<f64> =
+                    uppercase.iter().map(|g| g.bbox.h as f64).collect();
                 heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 if heights.is_empty() {
-                    // No uppercase — fallback to median of all labeled glyphs.
-                    let mut all: Vec<f64> = manifest
-                        .glyphs
-                        .iter()
-                        .filter(|g| g.glyph_name.is_some())
-                        .map(|g| g.bbox.h as f64)
-                        .collect();
+                    // No labeled uppercase — median height of all crops.
+                    let mut all: Vec<f64> =
+                        manifest.glyphs.iter().map(|g| g.bbox.h as f64).collect();
                     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     all.get(all.len() / 2).copied().unwrap_or(200.0)
                 } else {
                     heights[heights.len() / 2]
                 }
             });
-
         let uniform_scale = cap_height / reference_height;
 
-        // Per-row baselines: average bottom edge of uppercase letters in each row.
+        // Per-row baselines: median bottom edge of uppercase letters that
+        // sit flat on the baseline (exclude J and Q which may descend).
         let mut row_uc_bottoms: HashMap<usize, Vec<f64>> = HashMap::new();
         for g in &uppercase {
+            if matches!(g.codepoint(), Some('J') | Some('Q')) {
+                continue;
+            }
             row_uc_bottoms
                 .entry(g.row)
                 .or_default()
@@ -76,78 +90,58 @@ impl SpecimenMetrics {
 
         let mut baselines: HashMap<usize, f64> = HashMap::new();
         for (row, bottoms) in &row_uc_bottoms {
-            let avg = bottoms.iter().sum::<f64>() / bottoms.len() as f64;
-            baselines.insert(*row, avg);
+            let mut sorted = bottoms.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            baselines.insert(*row, sorted[sorted.len() / 2]);
         }
 
-        // For rows without uppercase, try to infer from non-descender glyphs
-        // or fall back to the nearest row that has a baseline.
-        let all_rows: Vec<usize> = manifest.glyphs.iter().map(|g| g.row).collect();
-        let max_row = all_rows.iter().max().copied().unwrap_or(0);
-
+        // Rows without uppercase: median bottom of non-descender glyphs,
+        // else the nearest row that has a baseline.
+        let max_row = manifest.glyphs.iter().map(|g| g.row).max().unwrap_or(0);
         for row in 0..=max_row {
             if baselines.contains_key(&row) {
                 continue;
             }
-            // Use non-descender glyphs: their bottom edge ≈ baseline.
-            let non_descender_bottoms: Vec<f64> = manifest
+            let mut bottoms: Vec<f64> = manifest
                 .glyphs
                 .iter()
-                .filter(|g| g.row == row && g.glyph_name.is_some())
+                .filter(|g| g.row == row)
                 .filter(|g| {
-                    // Exclude known descender glyphs
-                    let name = g.glyph_name.as_deref().unwrap_or("");
-                    !matches!(name, "g" | "j" | "p" | "q" | "y" | "Q" | "J")
+                    !matches!(
+                        g.codepoint(),
+                        Some('g' | 'j' | 'p' | 'q' | 'y' | 'Q' | 'J')
+                    )
                 })
                 .map(|g| (g.bbox.y + g.bbox.h) as f64)
                 .collect();
-
-            if !non_descender_bottoms.is_empty() {
-                let median_idx = non_descender_bottoms.len() / 2;
-                let mut sorted = non_descender_bottoms.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                baselines.insert(row, sorted[median_idx]);
-            } else {
-                // Last resort: find nearest row with a baseline.
-                if let Some(nearest) = baselines.keys().min_by_key(|&&r| (r as isize - row as isize).unsigned_abs()) {
-                    baselines.insert(row, baselines[nearest]);
-                }
+            if !bottoms.is_empty() {
+                bottoms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                baselines.insert(row, bottoms[bottoms.len() / 2]);
+            } else if let Some(&nearest) = baselines
+                .keys()
+                .min_by_key(|&&r| (r as isize - row as isize).unsigned_abs())
+            {
+                baselines.insert(row, baselines[&nearest]);
             }
         }
 
         Self {
             uniform_scale,
             baselines,
-            padding,
         }
     }
 
-    /// Compute per-glyph tracing parameters (target_height, y_offset).
-    fn glyph_params(&self, entry: &GlyphEntry, source_height: u32) -> (f64, f64) {
-        let padding = self.padding;
-
-        // Reconstruct the crop bounds in source image coordinates.
-        let crop_top = (entry.bbox.y).saturating_sub(padding) as f64;
-        let crop_bottom = ((entry.bbox.y + entry.bbox.h + padding) as u32).min(source_height) as f64;
-        let crop_h = crop_bottom - crop_top;
-
-        // Target height: scale the crop uniformly.
-        let target_height = crop_h * self.uniform_scale;
-
-        // Baseline for this glyph's row.
-        let baseline_y = self
+    /// Font-unit vertical band `[y_min, y_max]` for a glyph: its sheet bbox
+    /// mapped through the row baseline and the uniform scale.
+    fn band(&self, entry: &GlyphEntry) -> (f64, f64) {
+        let baseline = self
             .baselines
             .get(&entry.row)
             .copied()
-            .unwrap_or(crop_bottom); // fallback: bottom of crop = baseline
-
-        // y_offset: the bottom of the crop in font units should place the baseline at y=0.
-        // In img2bez, bottom of image = y_offset, top = y_offset + target_height.
-        // The baseline is (crop_bottom - baseline_y) pixels from the bottom of the crop.
-        // After scaling: (crop_bottom - baseline_y) * uniform_scale + y_offset = 0
-        let y_offset = -((crop_bottom - baseline_y) * self.uniform_scale);
-
-        (target_height, y_offset)
+            .unwrap_or((entry.bbox.y + entry.bbox.h) as f64);
+        let y_max = (baseline - entry.bbox.y as f64) * self.uniform_scale;
+        let y_min = (baseline - (entry.bbox.y + entry.bbox.h) as f64) * self.uniform_scale;
+        (y_min, y_max)
     }
 }
 
@@ -157,78 +151,84 @@ const GREEN_MARK_PREFIX: &str = "0.3,0.7,0.3";
 /// Red = pipeline output, will be regenerated on next rebuild.
 const RED_MARK: &str = "1,0.3,0.3,1";
 
-/// Build a Google Fonts-compliant UFO from the segmented glyph PNGs.
-///
-/// If the output UFO already exists, green-marked glyphs are preserved
-/// (not overwritten). All newly traced glyphs are marked red.
-pub fn build(config: &PipelineConfig, manifest: &Manifest, glyph_dir: &Path) -> Result<()> {
+/// Build the UFO. If the output UFO already exists, green-marked glyphs are
+/// preserved (not overwritten). All newly traced glyphs are marked red.
+pub fn build(
+    config: &PipelineConfig,
+    manifest: &Manifest,
+    glyph_dir: &Path,
+    ufo_path: &Path,
+) -> Result<BuildReport> {
     // Load existing UFO if present (to preserve green glyphs).
-    let existing_font = if config.output.exists() {
-        Font::load(&config.output).ok()
+    let existing_font = if ufo_path.exists() {
+        Font::load(ufo_path).ok()
     } else {
         None
     };
 
     let mut font = Font::new();
+    let mut report = BuildReport {
+        traced: 0,
+        green_kept: 0,
+        unlabeled: 0,
+        failed: Vec::new(),
+        encoded: HashSet::new(),
+    };
 
-    apply_font_info(&mut font.font_info, config);
-
-    // Add required .notdef and space glyphs.
     add_notdef(&mut font, config);
     add_space(&mut font, config);
+    report.encoded.insert(0x0020);
+    report.encoded.insert(0x00A0);
 
-    // Compute uniform scale and per-row baselines from the specimen layout.
-    let specimen = SpecimenMetrics::from_manifest(manifest, config.cap_height as f64, 10);
+    let specimen = SpecimenMetrics::from_manifest(manifest, config.cap_height as f64);
     if config.verbose {
         eprintln!(
-            "ufo_builder: uniform scale = {:.3} units/px (cap ref → {} units)",
+            "ufo_builder: uniform scale = {:.3} units/px (cap ref -> {} units)",
             specimen.uniform_scale, config.cap_height
         );
-        for (row, bl) in &specimen.baselines {
-            eprintln!("ufo_builder: row {} baseline at y={:.0}px", row, bl);
+        let mut rows: Vec<_> = specimen.baselines.iter().collect();
+        rows.sort_by_key(|&(row, _)| *row);
+        for (row, bl) in rows {
+            eprintln!("ufo_builder: row {row} baseline at y={bl:.0}px");
         }
     }
 
-    // Read source image dimensions for crop-bound clamping.
-    let source_height = manifest
-        .glyphs
-        .iter()
-        .map(|g| g.bbox.y + g.bbox.h + 20)
-        .max()
-        .unwrap_or(2000);
+    let trace_opts = trace_options(config);
+    let spacing_defaults = SpacingDefaults::for_upm(config.upm as f64, config.grid);
 
-    // Track glyph order for lib.plist.
-    let mut glyph_order: Vec<String> = vec![".notdef".into(), "space".into()];
+    // Font-wide ink bounds (for win metrics).
+    let mut font_y_max = f64::MIN;
+    let mut font_y_min = f64::MAX;
+
+    let mut glyph_order: Vec<String> =
+        vec![".notdef".into(), "space".into(), "uni00A0".into()];
 
     for entry in &manifest.glyphs {
-        // Skip unlabeled entries (noise/blank from segmentation).
-        if entry.glyph_name.is_none() && entry.unicode.is_none() {
-            if config.verbose {
-                eprintln!("ufo_builder: skipping unlabeled {:?}", entry.file);
-            }
-            continue;
-        }
-
         let glyph_name = entry
             .glyph_name
-            .as_deref()
-            .unwrap_or(entry.id.as_str());
+            .clone()
+            .unwrap_or_else(|| entry.id.replace('_', ""));
+        if entry.codepoint().is_none() {
+            report.unlabeled += 1;
+        }
 
-        // Preserve green glyphs: if the existing UFO has this glyph marked
-        // green, keep it instead of re-tracing.
+        // Preserve green (hand-corrected) glyphs from the existing UFO.
         if let Some(ref existing) = existing_font {
-            if let Some(existing_glyph) = existing.default_layer().get_glyph(glyph_name) {
+            if let Some(existing_glyph) = existing.default_layer().get_glyph(&glyph_name) {
                 let mark = existing_glyph
                     .lib
                     .get("public.markColor")
                     .and_then(|v| v.as_string())
                     .unwrap_or("");
                 if mark.starts_with(GREEN_MARK_PREFIX) {
-                    // Green — keep the hand-drawn glyph.
                     font.default_layer_mut().insert_glyph(existing_glyph.clone());
-                    glyph_order.push(glyph_name.to_string());
+                    glyph_order.push(glyph_name.clone());
+                    report.green_kept += 1;
+                    if let Some(ch) = entry.codepoint() {
+                        report.encoded.insert(ch as u32);
+                    }
                     if config.verbose {
-                        eprintln!("ufo_builder: keeping green {:?}", glyph_name);
+                        eprintln!("ufo_builder: keeping green {glyph_name:?}");
                     }
                     continue;
                 }
@@ -236,131 +236,144 @@ pub fn build(config: &PipelineConfig, manifest: &Manifest, glyph_dir: &Path) -> 
         }
 
         let png_path = glyph_dir.join(&entry.file);
-        let (target_height, y_offset) = specimen.glyph_params(entry, source_height);
-
-        match trace_and_add_glyph(&mut font, entry, &png_path, config, target_height, y_offset) {
-            Ok(name) => {
-                glyph_order.push(name.clone());
+        match trace_one(
+            entry,
+            &glyph_name,
+            &png_path,
+            config,
+            &specimen,
+            &trace_opts,
+            &spacing_defaults,
+        ) {
+            Ok((glyph, y_min, y_max)) => {
+                font_y_max = font_y_max.max(y_max);
+                font_y_min = font_y_min.min(y_min);
+                if let Some(ch) = entry.codepoint() {
+                    report.encoded.insert(ch as u32);
+                }
+                font.default_layer_mut().insert_glyph(glyph);
+                glyph_order.push(glyph_name.clone());
+                report.traced += 1;
                 if config.verbose {
-                    eprintln!("ufo_builder: traced {:?} → {}", entry.file, name);
+                    eprintln!("ufo_builder: traced {:?} -> {}", entry.file, glyph_name);
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "ufo_builder: warning: skipping {:?}: {}",
-                    entry.file, e
-                );
+                eprintln!("ufo_builder: warning: skipping {:?}: {e:#}", entry.file);
+                report
+                    .failed
+                    .push((entry.file.display().to_string(), format!("{e:#}")));
             }
         }
     }
 
-    // Add empty placeholder glyphs for all GF Latin Core codepoints
-    // not already present from the traced specimen.
-    let existing: std::collections::HashSet<String> = glyph_order.iter().cloned().collect();
-    let default_width = config.upm as f64 / 2.0;
-    for &(cp, name) in gf_latin_core::GLYPHSET {
-        if !existing.contains(name) {
-            let mut glyph = Glyph::new(name);
-            glyph.width = default_width;
-            if let Some(ch) = char::from_u32(cp) {
-                glyph.codepoints.insert(ch);
-            }
-            font.default_layer_mut().insert_glyph(glyph);
-            glyph_order.push(name.to_string());
-        }
-    }
-
-    // lib.plist: glyph order.
+    apply_font_info(&mut font.font_info, config, font_y_min, font_y_max);
     apply_lib(&mut font, &glyph_order);
 
-    font.save(&config.output)
-        .with_context(|| format!("Failed to write UFO to {:?}", config.output))?;
+    font.save(ufo_path)
+        .with_context(|| format!("Failed to write UFO to {ufo_path:?}"))?;
 
-    Ok(())
+    Ok(report)
 }
 
-fn trace_and_add_glyph(
-    font: &mut Font,
+fn trace_options(config: &PipelineConfig) -> TraceOptions {
+    let mut opts = TraceOptions::for_profile(config.profile);
+    if let Some(acc) = config.accuracy {
+        opts.fit_accuracy = acc;
+    }
+    opts.grid = config.grid;
+    opts
+}
+
+/// Trace one crop and place it: vertical band from the specimen metrics,
+/// sidebearings from the spacing-v0 edge classifier. Returns the finished
+/// norad glyph plus its font-unit ink y-range.
+#[allow(clippy::too_many_arguments)]
+fn trace_one(
     entry: &GlyphEntry,
+    glyph_name: &str,
     png_path: &Path,
     config: &PipelineConfig,
-    target_height: f64,
-    y_offset: f64,
-) -> Result<String> {
-    let glyph_name = entry
-        .glyph_name
-        .as_deref()
-        .unwrap_or(entry.id.as_str());
+    specimen: &SpecimenMetrics,
+    trace_opts: &TraceOptions,
+    spacing_defaults: &SpacingDefaults,
+) -> Result<(Glyph, f64, f64)> {
+    let bytes = std::fs::read(png_path)
+        .with_context(|| format!("Cannot read glyph image {png_path:?}"))?;
 
-    let tracing_config = TracingConfig {
-        target_height,
-        y_offset,
-        grid: config.grid,
-        fit_accuracy: config.accuracy,
-        smooth_iterations: config.smooth_iterations,
-        alphamax: config.alphamax,
-        ..Default::default()
-    };
+    let (y_min, y_max) = specimen.band(entry);
+    anyhow::ensure!(y_max > y_min, "empty vertical band for {glyph_name}");
 
-    let result = trace(png_path, &tracing_config)
-        .with_context(|| format!("img2bez tracing failed for {:?}", png_path))?;
-
-    let mut glyph = Glyph::new(glyph_name);
-    glyph.width = result.advance_width;
-
-    // Set Unicode codepoint if present.
-    if let Some(ref hex) = entry.unicode {
-        if let Ok(cp) = u32::from_str_radix(hex.trim_start_matches("U+"), 16) {
-            if let Some(ch) = char::from_u32(cp) {
-                glyph.codepoints.insert(ch);
-            }
-        }
-    }
-
-    // Store the image→font transform so editors can place the source
-    // image exactly where the trace came from. The transform is:
-    //   scale = target_height / image_pixel_height
-    //   font_x = pixel_x * scale + shift_x
-    //   font_y = pixel_y * scale + shift_y
-    // where shift = reposition_shift from img2bez.
-    {
-        let (shift_x, shift_y) = result.reposition_shift;
-        let img = image::open(png_path).ok();
-        let img_h = img.as_ref().map(|i| i.height()).unwrap_or(1) as f64;
-        let scale = target_height / img_h;
-        glyph.lib.insert(
-            "com.img2ufo.imageScale".into(),
-            Value::Real(scale),
-        );
-        glyph.lib.insert(
-            "com.img2ufo.imageOffsetX".into(),
-            Value::Real(shift_x),
-        );
-        glyph.lib.insert(
-            "com.img2ufo.imageOffsetY".into(),
-            Value::Real(shift_y + y_offset),
-        );
-    }
-
-    // Convert kurbo bezier paths to norad contours.
-    for bez_path in &result.paths {
-        if let Some(contour) = kurbo_path_to_norad_contour(bez_path) {
-            glyph.contours.push(contour);
-        }
-    }
-
-    // Mark as red (pipeline output, will be regenerated on next rebuild).
-    glyph.lib.insert(
-        "public.markColor".into(),
-        Value::String(RED_MARK.into()),
+    // First placement pass: ink at lsb 0 so the outline is in a known frame.
+    let mut placement = PlacementOptions::ink_fit(
+        TargetBand::Custom { y_min, y_max },
+        Sidebearings::Explicit { lsb: 0.0, rsb: 0.0 },
     );
+    placement.grid = config.grid;
+    let mut opts = trace_opts.clone();
+    opts.rtl_start = entry
+        .codepoint()
+        .map(img2bez::is_rtl_codepoint)
+        .unwrap_or(false);
+    let (mut placed, _report) = trace_place(&bytes, &opts, &placement)
+        .map_err(|e| anyhow::anyhow!("img2bez: {e}"))?;
 
-    font.default_layer_mut().insert_glyph(glyph);
+    // Spacing v0: classify the ink edges, shift to the class LSB, and set
+    // the advance from the class RSB.
+    let (left_class, right_class) = spacing::classify_edges(&placed.outline, config.upm as f64);
+    let lsb = spacing_defaults.sidebearing(left_class);
+    let rsb = spacing_defaults.sidebearing(right_class);
 
-    Ok(glyph_name.to_string())
+    let (ink_x_min, ink_x_max, ink_y_min, ink_y_max) = outline_bounds(&placed.outline);
+    let dx = lsb - ink_x_min;
+    // dx is grid-aligned already (lsb snapped, ink_x_min at 0 from placement),
+    // but round defensively so coordinates stay integers.
+    let dx = dx.round();
+    for contour in &mut placed.outline.contours {
+        for point in &mut contour.points {
+            point.x += dx;
+        }
+    }
+    placed.advance_width = snap(ink_x_max + dx + rsb, config.grid);
+
+    let codepoints: Vec<char> = entry.codepoint().into_iter().collect();
+    let mut glyph = img2bez::ufo::to_glyph(glyph_name, &placed, &codepoints)
+        .map_err(|e| anyhow::anyhow!("img2bez glif conversion: {e}"))?;
+
+    // Mark as red (pipeline output, regenerated on the next rebuild).
+    glyph
+        .lib
+        .insert("public.markColor".into(), Value::String(RED_MARK.into()));
+
+    Ok((glyph, ink_y_min, ink_y_max))
 }
 
-/// Add a .notdef glyph with a standard empty rectangle (required by OpenType spec).
+/// Ink bounding box of an outline from its rendered bezier paths.
+fn outline_bounds(outline: &img2bez::Outline) -> (f64, f64, f64, f64) {
+    use img2bez::kurbo::Shape;
+    let mut x0 = f64::MAX;
+    let mut y0 = f64::MAX;
+    let mut x1 = f64::MIN;
+    let mut y1 = f64::MIN;
+    for path in outline.to_bezpaths() {
+        let b = path.bounding_box();
+        x0 = x0.min(b.x0);
+        y0 = y0.min(b.y0);
+        x1 = x1.max(b.x1);
+        y1 = y1.max(b.y1);
+    }
+    (x0, x1, y0, y1)
+}
+
+fn snap(v: f64, grid: i32) -> f64 {
+    if grid > 1 {
+        (v / grid as f64).round() * grid as f64
+    } else {
+        v.round()
+    }
+}
+
+/// Add a .notdef glyph with a standard open-box rectangle.
 fn add_notdef(font: &mut Font, config: &PipelineConfig) {
     let upm = config.upm as f64;
     let w = upm * 0.5;
@@ -374,20 +387,20 @@ fn add_notdef(font: &mut Font, config: &PipelineConfig) {
     // Outer rectangle
     let outer = Contour::new(
         vec![
-            cp(kurbo::Point::new(stroke, desc + stroke), PointType::Line),
-            cp(kurbo::Point::new(w - stroke, desc + stroke), PointType::Line),
-            cp(kurbo::Point::new(w - stroke, asc - stroke), PointType::Line),
-            cp(kurbo::Point::new(stroke, asc - stroke), PointType::Line),
+            cp(stroke, desc + stroke, PointType::Line),
+            cp(w - stroke, desc + stroke, PointType::Line),
+            cp(w - stroke, asc - stroke, PointType::Line),
+            cp(stroke, asc - stroke, PointType::Line),
         ],
         None,
     );
     // Inner rectangle (counter — opposite winding)
     let inner = Contour::new(
         vec![
-            cp(kurbo::Point::new(stroke * 2.0, desc + stroke * 2.0), PointType::Line),
-            cp(kurbo::Point::new(stroke * 2.0, asc - stroke * 2.0), PointType::Line),
-            cp(kurbo::Point::new(w - stroke * 2.0, asc - stroke * 2.0), PointType::Line),
-            cp(kurbo::Point::new(w - stroke * 2.0, desc + stroke * 2.0), PointType::Line),
+            cp(stroke * 2.0, desc + stroke * 2.0, PointType::Line),
+            cp(stroke * 2.0, asc - stroke * 2.0, PointType::Line),
+            cp(w - stroke * 2.0, asc - stroke * 2.0, PointType::Line),
+            cp(w - stroke * 2.0, desc + stroke * 2.0, PointType::Line),
         ],
         None,
     );
@@ -397,171 +410,130 @@ fn add_notdef(font: &mut Font, config: &PipelineConfig) {
     font.default_layer_mut().insert_glyph(glyph);
 }
 
-/// Add a space glyph (required for any text font).
+/// Add space and no-break space (U+00A0 is required by fontspector's
+/// whitespace_glyphs check; it clones the space width).
 fn add_space(font: &mut Font, config: &PipelineConfig) {
+    let width = snap(config.upm as f64 / 4.0, config.grid);
     let mut glyph = Glyph::new("space");
-    glyph.width = config.upm as f64 / 4.0;
+    glyph.width = width;
     glyph.codepoints.insert(' ');
     font.default_layer_mut().insert_glyph(glyph);
-}
 
-/// Populate lib.plist with Google Fonts-required keys.
-fn apply_lib(font: &mut Font, glyph_order: &[String]) {
-    // public.glyphOrder — controls glyph ordering in compiled font.
-    let order: Vec<Value> = glyph_order.iter().map(|s| Value::String(s.clone())).collect();
-    font.lib.insert("public.glyphOrder".into(), Value::Array(order));
-
-    // public.skipExportGlyphs — empty, but present for tooling compat.
-    font.lib.insert("public.skipExportGlyphs".into(), Value::Array(vec![]));
-}
-
-/// Convert a `kurbo::BezPath` to a closed `norad::Contour`.
-///
-/// UFO closed contours do NOT use PointType::Move. Instead the first point
-/// gets the type of the closing segment (Curve, Line, etc.) and the contour
-/// is implicitly cyclic. This matches how norad/img2bez represent closed paths.
-fn kurbo_path_to_norad_contour(path: &kurbo::BezPath) -> Option<Contour> {
-    let elements = path.elements();
-    if elements.is_empty() {
-        return None;
-    }
-
-    // First element must be MoveTo — grab its position.
-    let first = match elements.first()? {
-        PathEl::MoveTo(p) => *p,
-        _ => return None,
-    };
-
-    let mut points: Vec<ContourPoint> = Vec::new();
-
-    for el in elements.iter().skip(1) {
-        match *el {
-            PathEl::LineTo(p) => {
-                points.push(cp(p, PointType::Line));
-            }
-            PathEl::CurveTo(a, b, p) => {
-                points.push(cp(a, PointType::OffCurve));
-                points.push(cp(b, PointType::OffCurve));
-                points.push(cp(p, PointType::Curve));
-            }
-            PathEl::QuadTo(a, p) => {
-                points.push(cp(a, PointType::OffCurve));
-                points.push(cp(p, PointType::QCurve));
-            }
-            PathEl::ClosePath | PathEl::MoveTo(_) => {}
-        }
-    }
-
-    if points.is_empty() {
-        return None;
-    }
-
-    // Determine the closing type from the last segment.
-    let closing_type = elements
-        .iter()
-        .rev()
-        .find(|e| !matches!(e, PathEl::ClosePath))
-        .map(|e| match e {
-            PathEl::CurveTo(..) => PointType::Curve,
-            PathEl::QuadTo(..) => PointType::QCurve,
-            _ => PointType::Line,
-        })
-        .unwrap_or(PointType::Line);
-
-    // Remove duplicate closing point if the last on-curve equals the MoveTo.
-    let last_oncurve = points.iter().rposition(|p| {
-        matches!(p.typ, PointType::Curve | PointType::Line | PointType::QCurve)
-    });
-    if let Some(idx) = last_oncurve {
-        let last = &points[idx];
-        if (last.x - first.x).abs() < 0.5 && (last.y - first.y).abs() < 0.5 {
-            points.remove(idx);
-        }
-    }
-
-    // Insert the first point with the closing type (UFO cyclic convention).
-    points.insert(0, cp(first, closing_type));
-
-    Some(Contour::new(points, None))
+    let mut nbsp = Glyph::new("uni00A0");
+    nbsp.width = width;
+    nbsp.codepoints.insert('\u{00A0}');
+    font.default_layer_mut().insert_glyph(nbsp);
 }
 
 #[inline]
-fn cp(p: kurbo::Point, typ: PointType) -> ContourPoint {
-    // On-curve points are smooth (continuous tangent at each point).
-    let smooth = matches!(typ, PointType::Curve | PointType::QCurve);
-    ContourPoint::new(p.x, p.y, typ, smooth, None, None)
+fn cp(x: f64, y: f64, typ: PointType) -> ContourPoint {
+    ContourPoint::new(x, y, typ, false, None, None)
 }
 
-/// Populate `FontInfo` with Google Fonts-required fields.
-fn apply_font_info(info: &mut FontInfo, config: &PipelineConfig) {
-    info.family_name = Some(config.family_name.clone());
-    info.style_name = Some(config.style_name.clone());
+/// Populate lib.plist keys.
+fn apply_lib(font: &mut Font, glyph_order: &[String]) {
+    let order: Vec<Value> = glyph_order
+        .iter()
+        .map(|s| Value::String(s.clone()))
+        .collect();
+    font.lib
+        .insert("public.glyphOrder".into(), Value::Array(order));
+}
 
-    // Postscript name: "FamilyName-StyleName", spaces removed.
-    let ps_family = config.family_name.replace(' ', "");
-    let ps_style = config.style_name.replace(' ', "");
-    info.postscript_font_name = Some(format!("{}-{}", ps_family, ps_style));
-    info.postscript_full_name =
-        Some(format!("{} {}", config.family_name, config.style_name));
+/// Populate `FontInfo` per docs/gf-compliance-checklist.md.
+///
+/// Vertical metrics strategy (checklist section 1):
+/// - typoDescender = --descender; typoAscender chosen so that
+///   (a) typoAscender - capHeight ~= |typoDescender| (caps centered) and
+///   (b) typoAscender + |typoDescender| >= 120% of UPM.
+/// - hhea == typo, all lineGaps 0, fsSelection bit 7 (USE_TYPO_METRICS).
+/// - win = the actual ink extremes of this build (floored at the typo
+///   values). Single-master family, so family-wide == this font.
+fn apply_font_info(info: &mut FontInfo, config: &PipelineConfig, ink_y_min: f64, ink_y_max: f64) {
+    info.family_name = Some(config.family.clone());
+    info.style_name = Some(config.style.clone());
+    info.style_map_family_name = Some(config.family.clone());
+    info.style_map_style_name = Some(StyleMapStyle::Regular);
 
-    // Vertical metrics.
+    let ps_family = config.family.replace(' ', "");
+    let ps_style = config.style.replace(' ', "");
+    info.postscript_font_name = Some(format!("{ps_family}-{ps_style}"));
+    info.postscript_full_name = Some(format!("{} {}", config.family, config.style));
+
     info.units_per_em = NonNegativeIntegerOrFloat::new(config.upm as f64);
     info.ascender = Some(config.ascender as f64);
     info.descender = Some(config.descender as f64);
     info.x_height = Some(config.x_height as f64);
     info.cap_height = Some(config.cap_height as f64);
+    info.italic_angle = Some(0.0);
 
-    // Google Fonts vertical metrics strategy:
-    // typo and hhea must match, lineGap must be 0, fsSelection bit 7 set.
-    // Sum of ascender + abs(descender) must be >= 1200 for the hhea check.
-    // With 1024 UPM: use typo ascender = UPM (1024), descender as-is (-256).
-    // Sum = 1024 + 256 = 1280 >= 1200.
-    let typo_asc = (config.upm as i32).max(config.ascender);
-    let typo_desc = config.descender;
+    // --- Vertical metrics (GF strategy; see doc comment) ---
+    let upm = config.upm as i32;
+    let typo_desc = config.descender.min(-1);
+    let min_sum = (config.upm as f64 * 1.2).ceil() as i32;
+    let typo_asc = config
+        .ascender
+        .max(config.cap_height + typo_desc.abs())
+        .max(min_sum - typo_desc.abs())
+        .min(upm.max(config.ascender)); // never past the em unless ascender is
     info.open_type_os2_typo_ascender = Some(typo_asc);
     info.open_type_os2_typo_descender = Some(typo_desc);
     info.open_type_os2_typo_line_gap = Some(0);
-    // winAscent/winDescent should cover the font's actual bounding box.
-    // Use generous values to account for overshoots and accented characters.
-    info.open_type_os2_win_ascent = Some(typo_asc.max(config.ascender + 128) as u32);
-    info.open_type_os2_win_descent = Some(typo_desc.unsigned_abs().max(config.descender.unsigned_abs() + 128));
     info.open_type_hhea_ascender = Some(typo_asc);
     info.open_type_hhea_descender = Some(typo_desc);
     info.open_type_hhea_line_gap = Some(0);
 
-    // fsSelection bit 7 = USE_TYPO_METRICS (required by Google Fonts).
-    // Bits 0, 5, 6 are set automatically by the compiler from style name.
+    // win metrics from the real ink extremes of the build.
+    let y_max = if ink_y_max.is_finite() { ink_y_max } else { 0.0 };
+    let y_min = if ink_y_min.is_finite() { ink_y_min } else { 0.0 };
+    info.open_type_os2_win_ascent = Some((y_max.ceil() as i32).max(typo_asc) as u32);
+    info.open_type_os2_win_descent =
+        Some(((-y_min).ceil() as i32).max(typo_desc.abs()) as u32);
+
+    // fsSelection bit 7 = USE_TYPO_METRICS. Bits 0/5/6 come from the
+    // style map at compile time.
     info.open_type_os2_selection = Some(vec![7]);
-
-    // fsType = 0 (Installable embedding, required by Google Fonts).
+    // fsType = 0 (installable embedding).
     info.open_type_os2_type = Some(vec![]);
-
-    // Head flags: bit 0 (baseline at y=0), bit 3 (force ppem to integer).
+    info.open_type_os2_weight_class = Some(400);
+    info.open_type_os2_width_class = Some(img2bez::norad::fontinfo::Os2WidthClass::Normal);
     info.open_type_head_flags = Some(vec![0, 3]);
 
-    // Copyright (Google Fonts format).
-    info.copyright = Some(format!(
-        "Copyright 2026 The {} Project Authors (https://github.com/example/{})",
-        config.family_name,
-        config.family_name.to_lowercase().replace(' ', "-")
-    ));
-
-    // Version string (Google Fonts requires >= 1.000).
+    // --- Name table (checklist section 2) ---
+    info.copyright = Some(config.copyright.clone());
+    info.open_type_name_designer = Some(config.designer.clone());
     info.open_type_name_version = Some("Version 1.000".to_string());
     info.version_major = Some(1);
     info.version_minor = Some(0);
 
-    // License (SIL OFL, required by Google Fonts).
+    // Name ID 13/14, exact strings from the GF guide.
     info.open_type_name_license = Some(
-        "This Font Software is licensed under the SIL Open Font License, Version 1.1. \
-         This license is available with a FAQ at: https://openfontlicense.org"
+        "This Font Software is licensed under the SIL Open Font License, \
+         Version 1.1. This license is available with a FAQ at: \
+         https://openfontlicense.org"
             .to_string(),
     );
     info.open_type_name_license_url = Some("https://openfontlicense.org".to_string());
 
-    // Designer name (required by Google Fonts, nameId=9).
-    info.open_type_name_designer = Some("Unknown".to_string());
-
-    // Vendor ID (use "NONE" as placeholder).
     info.open_type_os2_vendor_id = Some("NONE".to_string());
+}
+
+/// GF Latin Core coverage of this build.
+pub fn coverage_summary(encoded: &HashSet<u32>) -> String {
+    let (covered, total, missing) = gf_latin_core::coverage(encoded);
+    if missing.is_empty() {
+        format!("GF Latin Core coverage: {covered}/{total} (complete)")
+    } else {
+        let shown: Vec<&str> = missing.iter().take(12).copied().collect();
+        let more = missing.len().saturating_sub(shown.len());
+        let tail = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        format!(
+            "GF Latin Core coverage: {covered}/{total}; missing: {}{tail}",
+            shown.join(" ")
+        )
+    }
 }

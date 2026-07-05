@@ -2,18 +2,24 @@ mod gasp;
 mod gf_latin_core;
 mod manifest;
 mod pipeline;
+mod qa;
+mod repo_emit;
+mod spacing;
 mod ufo_builder;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
+use img2bez::Profile;
 use std::path::PathBuf;
 
 /// Convert a type specimen image to a Google Fonts-compliant UFO font source.
 ///
 /// Pipeline:
 ///   1. Segment glyphs from the input image (img2glyph)
-///   2. Trace each glyph PNG to bezier outlines (img2bez)
-///   3. Assemble a UFO font source with Google Fonts-compliant metadata
+///   2. Label glyph crops with codepoints (--labels)
+///   3. Trace each glyph PNG to bezier outlines (img2bez)
+///   4. Assemble a UFO with GF-compliant metadata (+ optional repo scaffold)
+///   5. Compile (fontc/fontmake) and gate on fontspector's googlefonts profile
 ///
 /// Use --glyph-dir to save or reuse intermediate glyph PNGs and manifest.json.
 /// If the directory already contains a manifest.json, segmentation is skipped.
@@ -24,9 +30,10 @@ struct Args {
     #[arg(short, long)]
     input: PathBuf,
 
-    /// Output UFO directory path (e.g. MyFont-Regular.ufo)
+    /// Output UFO directory path (e.g. MyFont-Regular.ufo).
+    /// Not needed with --emit-repo (the UFO goes into <repo>/sources/).
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Directory for intermediate glyph PNGs and manifest.json.
     /// If omitted, a temporary directory is used and cleaned up automatically.
@@ -34,13 +41,29 @@ struct Args {
     #[arg(long)]
     glyph_dir: Option<PathBuf>,
 
+    /// Labels file: JSON mapping glyph ids to codepoints,
+    /// e.g. {"glyph_0001": {"unicode": "U+0061"}}. Unlabeled glyphs are
+    /// included with production names but excluded from the cmap.
+    #[arg(long)]
+    labels: Option<PathBuf>,
+
     /// Family name for the font
-    #[arg(long, default_value = "Untitled")]
-    family_name: String,
+    #[arg(long, default_value = "Untitled Revival")]
+    family: String,
 
     /// Style name (e.g. Regular, Bold, Italic)
     #[arg(long, default_value = "Regular")]
-    style_name: String,
+    style: String,
+
+    /// Designer name (name ID 9)
+    #[arg(long, default_value = "Unknown")]
+    designer: String,
+
+    /// Upstream repository URL used in the GF copyright string
+    /// "Copyright {year} The {family} Project Authors ({git_url})".
+    /// Default: https://github.com/eliheuer/<family-slug>.
+    #[arg(long)]
+    git_url: Option<String>,
 
     /// Units per em (1024 = power-of-2 grid)
     #[arg(long, default_value_t = 1024)]
@@ -62,17 +85,14 @@ struct Args {
     #[arg(long, default_value_t = 768)]
     cap_height: i32,
 
-    /// Curve-fitting accuracy for bezier tracing (lower = more accurate, more points)
-    #[arg(long, default_value_t = 2.0)]
-    accuracy: f64,
+    /// img2bez source profile: wild, clean, or photo
+    #[arg(long, default_value = "wild")]
+    profile: String,
 
-    /// Polyline smoothing iterations before curve fitting (0–3; >1 blurs corners)
-    #[arg(long, default_value_t = 1)]
-    smooth_iterations: usize,
-
-    /// Corner detection threshold (0.0 = all corners, 1.34 = no corners; 0.8 default)
-    #[arg(long, default_value_t = 0.80)]
-    alphamax: f64,
+    /// Curve-fitting accuracy override in font units
+    /// (default: the profile's; lower = more points)
+    #[arg(long)]
+    accuracy: Option<f64>,
 
     /// Coordinate snapping grid (2 = even integers for power-of-2 grid; 0 = off)
     #[arg(long, default_value_t = 2)]
@@ -86,9 +106,14 @@ struct Args {
     #[arg(long, default_value_t = 50000)]
     max_area: u32,
 
-    /// Compile the UFO to TTF using fontc (requires fontc on PATH)
+    /// Skip the compile + fontspector QA gate
     #[arg(long)]
-    compile: bool,
+    no_qa: bool,
+
+    /// Emit a Google Fonts upstream repo scaffold at this directory
+    /// (sources/<ufo> + config.yaml, OFL.txt, README.md, Makefile, ...)
+    #[arg(long)]
+    emit_repo: Option<PathBuf>,
 
     /// Verbosity
     #[arg(short, long)]
@@ -98,67 +123,40 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    if args.verbose {
-        eprintln!("img2ufo: processing {:?}", args.input);
-    }
+    let profile: Profile = args
+        .profile
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!(e))?;
 
-    let output_path = args.output.clone();
-    let compile = args.compile;
-    let verbose = args.verbose;
-
-    let config = pipeline::PipelineConfig {
+    let mut config = pipeline::PipelineConfig {
         input: args.input,
         output: args.output,
         glyph_dir: args.glyph_dir,
-        family_name: args.family_name,
-        style_name: args.style_name,
+        labels: args.labels,
+        family: args.family,
+        style: args.style,
+        designer: args.designer,
+        git_url: args.git_url,
         upm: args.upm,
         ascender: args.ascender,
         descender: args.descender,
         x_height: args.x_height,
         cap_height: args.cap_height,
+        profile,
         accuracy: args.accuracy,
-        smooth_iterations: args.smooth_iterations,
-        alphamax: args.alphamax,
         grid: args.grid,
         min_area: args.min_area,
         max_area: args.max_area,
+        no_qa: args.no_qa,
+        emit_repo: args.emit_repo,
         verbose: args.verbose,
+        copyright: String::new(),
     };
+    config.copyright = pipeline::gf_copyright(
+        pipeline::current_year(),
+        &config.family,
+        &config.effective_git_url(),
+    );
 
-    pipeline::run(config)?;
-
-    if compile {
-        // Derive TTF filename: MyFont-Regular.ufo → MyFont-Regular.ttf
-        let ttf_path = output_path.with_extension("ttf");
-        if verbose {
-            eprintln!("img2ufo: compiling {:?} → {:?}", output_path, ttf_path);
-        }
-
-        let status = std::process::Command::new("fontc")
-            .arg(&output_path)
-            .arg("-o")
-            .arg(&ttf_path)
-            .status()
-            .with_context(|| {
-                "Failed to run `fontc` — is it installed?\n\
-                 Install it with: cargo install fontc"
-            })?;
-        if !status.success() {
-            anyhow::bail!("fontc exited with status {}", status);
-        }
-
-        // Patch in the gasp table (required by Google Fonts for unhinted fonts).
-        gasp::fix_gasp(&ttf_path)?;
-
-        if args.verbose {
-            eprintln!("img2ufo: compiled {:?} (gasp table added)", ttf_path);
-        }
-    }
-
-    if args.verbose {
-        eprintln!("img2ufo: done");
-    }
-
-    Ok(())
+    pipeline::run(config)
 }
