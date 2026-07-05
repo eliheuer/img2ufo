@@ -1,9 +1,10 @@
-/// Insert a `gasp` table into a compiled TrueType font file.
-///
-/// For unhinted fonts, Google Fonts requires a gasp table with a single range:
-///   rangeMaxPPEM = 0xFFFF, flags = SYMMETRIC_SMOOTHING | SYMMETRIC_GRIDFIT (0x000A)
-///
-/// This avoids requiring Python/gftools as a post-build dependency.
+//! Insert a `gasp` table into a compiled TrueType font file.
+//!
+//! For unhinted fonts, Google Fonts requires a gasp table with a single range:
+//!   rangeMaxPPEM = 0xFFFF, flags = 0x000F (gridfit + grayscale + symmetric
+//!   gridfit + symmetric smoothing) — fontspector googlefonts/gasp wants 0x0F.
+//!
+//! This avoids requiring Python/gftools as a post-build dependency.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -29,8 +30,8 @@ pub fn fix_gasp(ttf_path: &Path) -> Result<()> {
         }
     }
 
-    // Build the gasp table: version=0, 1 range, maxPPEM=0xFFFF, flags=0x000A
-    let gasp_data: [u8; 8] = [0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0x00, 0x0A];
+    // Build the gasp table: version=1, 1 range, maxPPEM=0xFFFF, flags=0x000F.
+    let gasp_data: [u8; 8] = [0x00, 0x01, 0x00, 0x01, 0xFF, 0xFF, 0x00, 0x0F];
     let gasp_checksum = table_checksum(&gasp_data);
 
     // New number of tables.
