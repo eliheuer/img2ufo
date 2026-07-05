@@ -53,3 +53,21 @@ First target corpus: ~/Desktop/letraset/ sheets.
 - [ ] fontspector gate wired in (stage 5).
 - [ ] Bridge A/B once the SR model exists (frontier plan item).
 - [ ] Spacing v0 from corpus sidebearing statistics.
+
+## Output repo template: virtua-grotesk
+
+Reference (per Eli, 2026-07-05): ~/GH/repos/virtua-grotesk — his
+GF-workflow model repo. img2ufo's stage 4 emits an upstream repo
+shaped like it, and its GOOGLE_FONTS_PORTING_CHECKLIST.md is the
+copy-the-system contract to follow:
+
+- sources/: <Family>-<Style>.ufo + <Family>.designspace +
+  config.yaml (gftools builder) + sources/README.md
+- fonts/ gitignored (built artifacts: ttf/, variable/)
+- OFL.txt, AUTHORS.txt, CONTRIBUTORS.txt, README.md, Makefile +
+  build.sh, documentation/
+- AGENTS.md/CLAUDE.md for the agent workflow (img2bez pattern)
+
+So the full contract: img2ufo(letraset sheet) -> a repo passing both
+fontspector's googlefonts profile AND every unchecked box in the
+porting checklist.
