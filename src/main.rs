@@ -1,3 +1,4 @@
+mod composites;
 mod gasp;
 mod gf_latin_core;
 mod manifest;

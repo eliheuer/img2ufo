@@ -27,6 +27,13 @@ First target corpus: ~/Desktop/letraset/ sheets.
    specimen provided), spacing v0 (sidebearings from ink bounds +
    corpus-calibrated defaults; learned spacing head later), kerning
    deferred to the learned head.
+   4b. **Compose** — src/composites.rs: anchors on bases + marks,
+   dotlessi/dotlessj + spacing<->combining derivations, then every
+   GF Latin Core composite whose base + mark exist (components
+   positioned by anchor arithmetic). Missing ingredients are never
+   faked; they land ranked in `<stem>-completion.json`, the worklist
+   consumed by the glyph-completion agent loop
+   (docs/glyph-completion-harness.md).
 5. **QA gate** — fontspector (googlefonts profile) on the compiled
    font (fontc or fontmake for compile during development; fontc
    preferred, Rust). The pipeline FAILS on fontspector FAILs the

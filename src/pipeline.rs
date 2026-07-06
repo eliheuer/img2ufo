@@ -154,7 +154,30 @@ pub fn run(config: PipelineConfig) -> Result<()> {
         report.unlabeled,
         report.failed.len()
     );
+    let comp = &report.completion;
+    println!(
+        "img2ufo: GF Latin Core coverage (traced): {}/{}",
+        comp.coverage_traced.covered, comp.coverage_traced.total
+    );
+    println!(
+        "img2ufo: composition: +{} composites, +{} derived ({} marks still missing, {} atomic glyphs need drawing)",
+        comp.built_composites.len(),
+        comp.derived_glyphs.len(),
+        comp.missing_marks.len(),
+        comp.missing_atomic.len()
+    );
+    for m in comp.missing_marks.iter().take(5) {
+        println!(
+            "  missing mark {} would unlock {} glyphs",
+            m.name,
+            m.unlocks.len()
+        );
+    }
     println!("img2ufo: {}", ufo_builder::coverage_summary(&report.encoded));
+    println!(
+        "img2ufo: completion worklist: {}",
+        report.worklist_path.display()
+    );
 
     // ------------------------------------------------------------------
     // Stage 4b: repo scaffold.

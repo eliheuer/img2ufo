@@ -15,7 +15,7 @@ use img2bez::norad::{Contour, ContourPoint, Font, FontInfo, Glyph, PointType};
 use img2bez::{trace_place, PlacementOptions, Sidebearings, TargetBand, TraceOptions};
 use plist::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What the build produced, for the pipeline's report.
 pub struct BuildReport {
@@ -27,8 +27,12 @@ pub struct BuildReport {
     pub unlabeled: usize,
     /// Crops that failed to trace: (file, error).
     pub failed: Vec<(String, String)>,
-    /// Encoded codepoints present in the cmap.
+    /// Encoded codepoints present in the cmap (after composition).
     pub encoded: HashSet<u32>,
+    /// Auto-composition results + agent worklist.
+    pub completion: crate::composites::CompletionReport,
+    /// Where the completion worklist JSON was written.
+    pub worklist_path: std::path::PathBuf,
 }
 
 // ============================================================================
@@ -147,7 +151,7 @@ impl SpecimenMetrics {
 
 /// Mark color values matching Runebender's palette (theme::mark::RGBA_STRINGS).
 /// Green = hand-corrected, keep on rebuild.
-const GREEN_MARK_PREFIX: &str = "0.3,0.7,0.3";
+pub(crate) const GREEN_MARK_PREFIX: &str = "0.3,0.7,0.3";
 /// Red = pipeline output, will be regenerated on next rebuild.
 const RED_MARK: &str = "1,0.3,0.3,1";
 
@@ -173,6 +177,8 @@ pub fn build(
         unlabeled: 0,
         failed: Vec::new(),
         encoded: HashSet::new(),
+        completion: Default::default(),
+        worklist_path: PathBuf::new(),
     };
 
     add_notdef(&mut font, config);
@@ -266,6 +272,36 @@ pub fn build(
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // Auto-composition: anchors + Latin Core composites from what the
+    // specimen provided, plus the completion worklist for the rest.
+    // ------------------------------------------------------------------
+    let composition = crate::composites::run(
+        &mut font,
+        existing_font.as_ref(),
+        config,
+        &mut report.encoded,
+        &mut glyph_order,
+    )?;
+    if composition.ink_y_max.is_finite() {
+        font_y_max = font_y_max.max(composition.ink_y_max);
+    }
+    if composition.ink_y_min.is_finite() {
+        font_y_min = font_y_min.min(composition.ink_y_min);
+    }
+    report.completion = composition.report;
+
+    let stem = ufo_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("font");
+    report.worklist_path = ufo_path.with_file_name(format!("{stem}-completion.json"));
+    std::fs::write(
+        &report.worklist_path,
+        serde_json::to_string_pretty(&report.completion)?,
+    )
+    .with_context(|| format!("Failed to write worklist {:?}", report.worklist_path))?;
 
     apply_font_info(&mut font.font_info, config, font_y_min, font_y_max);
     apply_lib(&mut font, &glyph_order);
