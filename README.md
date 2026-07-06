@@ -16,88 +16,122 @@ img2ufo orchestrates the full pipeline: one image in, one UFO out.
 cargo install --path .
 ```
 
-You also need [img2glyph](https://github.com/eliheuer/img2glyph) installed and on PATH for the segmentation step:
+You also need [img2glyph](https://github.com/eliheuer/img2glyph) and [fontc](https://github.com/googlefonts/fontc) on PATH:
 
 ```bash
 cargo install --git https://github.com/eliheuer/img2glyph
+cargo install fontc
 ```
 
 ---
 
-## Quick start
+## Training workflow
+
+The repo includes 9 training datasets in `references/`. Each starts from a scanned specimen and grows into a corrected font through hand-drawing + autoresearch.
+
+### 1. Process a new specimen
 
 ```bash
-# 1. Segment the specimen and save intermediate glyphs
-img2glyph process test.png --output glyphs/ --min-area 2000
+# Segment the image into individual glyph PNGs
+./train.sh specimen-001
 
-# 2. Label the glyphs (create assignments.json — see LLM workflow below)
-img2glyph label glyphs/manifest.json --assignments glyphs/assignments.json
-
-# 3. Build the UFO
-img2ufo -i test.png -o MyFont-Regular.ufo --glyph-dir glyphs/ --min-area 2000
+# This creates input-glyphs/ and stops — you need to label the glyphs next.
+# Use Claude Code to read the PNGs and write unicode-labels.json,
+# or create it manually (see references/README.md).
 ```
 
-If `--glyph-dir` points to a directory that already has a `manifest.json`, segmentation is skipped and only tracing + UFO assembly runs. This lets you iterate on tracing parameters without re-segmenting:
+### 2. Build the UFO
 
 ```bash
-# Tweak tracing and rebuild (fast — skips segmentation)
-img2ufo -i test.png -o MyFont-Regular.ufo --glyph-dir glyphs/ \
-    --accuracy 2.0 --smooth-iterations 1 --alphamax 0.80
+# Label + build (after unicode-labels.json exists)
+./train.sh specimen-001 --rebuild
 ```
 
-### Compile to TTF
-
-Add `--compile` to build a TTF with fontc in one shot (requires [fontc](https://github.com/googlefonts/fontc) on PATH):
+### 3. Open in Runebender
 
 ```bash
-img2ufo -i test.png -o MyFont-Regular.ufo --glyph-dir glyphs/ \
-    --family-name "My Font" --min-area 2000 --compile
+# Open the UFO with background images for tracing
+./train.sh specimen-001 --open
 ```
 
-### Edit with background images
+This opens the font in [Runebender](https://github.com/linebender/runebender) with each glyph's source image as a locked background. Trace over the background to correct outlines.
 
-Open the output in [Runebender](https://github.com/linebender/runebender) with the source glyph PNGs as background references for tracing:
+### 4. Hand-draw bootstrap glyphs
+
+Start with 5 key glyphs: **H, O, n, o, zero**. These establish stems, rounds, cap height, x-height, and numeral proportions. Mark each one **green** in Runebender's color panel when you're happy with it, then save.
+
+### 5. Rebuild (greens survive)
 
 ```bash
+./train.sh specimen-001 --rebuild
+```
+
+Green-marked glyphs are **preserved** — only red glyphs get regenerated. This means you never lose hand-drawn work. The workflow is:
+
+1. Draw and mark green → save
+2. Rebuild → reds regenerated, greens kept
+3. Review → promote improving glyphs to green
+4. Repeat until everything is green
+
+**Important:** Mark glyphs green and save in Runebender **before** running `--rebuild`. Uncolored edits will be overwritten.
+
+### Color system
+
+| Color | Meaning | On rebuild |
+|-------|---------|------------|
+| **Green** | Hand-corrected, good | **Kept** |
+| Yellow | Almost good | Regenerated |
+| Orange | Improving | Regenerated |
+| **Red** | Raw pipeline output | Regenerated |
+
+### train.sh reference
+
+```bash
+./train.sh specimen-001              # Segment image into glyph PNGs
+./train.sh specimen-001 --rebuild    # Build/rebuild UFO (preserves green)
+./train.sh specimen-001 --open       # Open in Runebender (no rebuild)
+./train.sh specimen-001 --rebuild --open  # Rebuild then open
+```
+
+---
+
+## Direct usage
+
+You can also use img2ufo directly without the training workflow:
+
+```bash
+# Segment + label + build in separate steps
+img2glyph process input.png --output glyphs/ --min-area 2000
+img2glyph label glyphs/manifest.json --assignments labels.json
+img2ufo -i input.png -o MyFont-Regular.ufo --glyph-dir glyphs/
+
+# Compile to TTF (adds gasp table, no Python needed)
+img2ufo -i input.png -o MyFont-Regular.ufo --glyph-dir glyphs/ --compile
+
+# Open in Runebender with background images
 runebender MyFont-Regular.ufo --glyph-images glyphs/
 ```
-
-Each glyph automatically gets its source image loaded as a locked background, scaled to fit the ascender-to-descender range. This lets you correct outlines by tracing over the original scan.
 
 ---
 
 ## How it works
 
-### Pipeline
-
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │  Specimen     │     │  Glyph PNGs  │     │  UFO font    │
 │  image (PNG)  │────▶│  + manifest  │────▶│  source      │
-│              │     │              │     │              │
 └──────────────┘     └──────────────┘     └──────────────┘
    img2glyph            img2bez              img2ufo
    (segment)           (trace)             (assemble)
 ```
 
-1. **Segment** — img2glyph binarizes the image, finds connected ink components, crops each glyph with padding, and writes a `manifest.json` with bounding boxes and reading order.
+1. **Segment** — img2glyph binarizes the image, finds connected ink components, crops each glyph with padding, and writes a manifest.
 
-2. **Label** — Unicode codepoints and glyph names are assigned to each entry in the manifest. This can be done manually, with a sequence string, or with LLM assistance (see below).
+2. **Label** — Unicode codepoints are assigned to each glyph. Use an LLM to read the PNGs and write `unicode-labels.json`, or create it manually.
 
-3. **Trace** — img2bez traces each glyph PNG to cubic bezier curves using a Potrace-based pipeline: pixel-edge contour extraction, optimal polygon approximation, corner detection, and curve fitting.
+3. **Trace** — img2bez traces each glyph PNG to cubic bezier curves with smooth-only outlines (on-curve points at extrema, H/V handles).
 
-4. **Assemble** — img2ufo builds a UFO3 font source with Google Fonts-required metadata: family/style names, vertical metrics, OS/2 and hhea tables, postscript names, and version string.
-
-### LLM-assisted labeling
-
-img2glyph extracts numbered PNGs in reading order. To assign Unicode codepoints, you need to identify which character each PNG represents. This is where an LLM helps:
-
-1. Open a Claude Code (or similar) session in the glyph directory
-2. The LLM reads each glyph PNG and identifies the character
-3. It writes `assignments.json` mapping glyph IDs to Unicode codepoints
-4. Run `img2glyph label` to apply the assignments
-
-See [img2glyph's LLM workflow docs](https://github.com/eliheuer/img2glyph#llm-workflow) for details.
+4. **Assemble** — img2ufo builds a UFO3 font with Google Fonts metadata, GF Latin Core character set (309 codepoints), and power-of-2 grid (1024 UPM).
 
 ---
 
@@ -107,120 +141,58 @@ See [img2glyph's LLM workflow docs](https://github.com/eliheuer/img2glyph#llm-wo
 |------|---------|-------------|
 | `-i, --input` | required | Input type specimen image |
 | `-o, --output` | required | Output UFO directory path |
-| `--glyph-dir` | temp dir | Directory for intermediate glyph PNGs. If it already contains manifest.json, segmentation is skipped. |
+| `--glyph-dir` | temp dir | Directory for glyph PNGs. If manifest.json exists, segmentation is skipped. |
 | `--family-name` | `Untitled` | Font family name |
-| `--style-name` | `Regular` | Style name (Regular, Bold, Italic, etc.) |
-| `--upm` | `1000` | Units per em |
-| `--ascender` | `800` | Ascender in font units |
-| `--descender` | `-200` | Descender in font units |
-| `--x-height` | `500` | x-height in font units |
-| `--cap-height` | `700` | Cap-height in font units |
-| `--accuracy` | `2.0` | Bezier curve-fitting accuracy (lower = tighter fit, more points) |
-| `--smooth-iterations` | `1` | Polyline smoothing before curve fitting (0–3) |
-| `--alphamax` | `0.80` | Corner detection threshold (lower = more corners) |
-| `--grid` | `0` | Coordinate snapping grid (0 = off) |
-| `--min-area` | `200` | Minimum glyph area in pixels (raise to filter scan noise) |
-| `--max-area` | `50000` | Maximum glyph area in pixels |
+| `--style-name` | `Regular` | Style name |
+| `--upm` | `1024` | Units per em (power-of-2 grid) |
+| `--ascender` | `832` | Ascender in font units |
+| `--descender` | `-256` | Descender in font units |
+| `--cap-height` | `768` | Cap height in font units |
+| `--x-height` | `576` | x-height in font units |
+| `--accuracy` | `2.0` | Bezier fitting accuracy (lower = tighter) |
+| `--grid` | `2` | Coordinate snapping (2 = even integers) |
+| `--min-area` | `200` | Minimum glyph area in pixels |
+| `--compile` | off | Compile UFO to TTF with fontc |
 | `-v, --verbose` | off | Print progress to stderr |
 
 ---
 
 ## Autoresearch
 
-img2ufo includes an autoresearch framework for systematically improving trace quality on scanned specimens. It follows the [Karpathy autoresearch](https://github.com/karpathy/autoresearch) pattern: an LLM proposes code changes, a script measures the result, and changes are kept or discarded based on a single metric.
-
-### How it works
+An overnight experiment loop that systematically improves trace quality. Follows the [Karpathy autoresearch](https://github.com/karpathy/autoresearch) pattern.
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────┐
-│ LLM reads   │     │ LLM makes   │     │ Script runs │     │ Keep or │
-│ program.md  │────▶│ ONE change  │────▶│ pipeline +  │────▶│ revert  │
-│             │     │ to code     │     │ measures IoU│     │         │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────┘
-       ▲                                                         │
-       └─────────────────────────────────────────────────────────┘
-                              repeat forever
+LLM reads program.md → makes ONE code change → script measures IoU → keep or revert → repeat
 ```
 
-1. **`program.md`** — instructions the LLM reads. Describes what to optimize (raster IoU), what code to change (img2bez, img2glyph, img2ufo), and the keep/discard protocol.
+Green-marked glyphs serve as ground truth. The LLM studies what makes green glyphs good and tries to make the pipeline produce similar output for red glyphs.
 
-2. **`run_scan_experiment.sh`** — traces input glyph PNGs with img2bez, compares each against a hand-corrected reference `.glif`, and reports mean raster IoU %.
+```bash
+# Run the experiment loop
+./autoresearch/run_scan_experiment.sh > run.log 2>&1
 
-3. **Reference sets** — each set has cropped glyph PNGs (input) and a hand-corrected UFO (ground truth). The LLM can't see these but the script measures against them.
+# Check results
+grep "mean_iou:" run.log
+```
 
-### Reference sets
+See `autoresearch/program.md` for the full protocol.
+
+---
+
+## Training data structure
 
 ```
 references/
   specimen-001/
-    source.png              # Original full-page scan
-    metadata.json           # Font metrics + config
-    assignments.json        # Unicode labels
-    input/                  # Cropped glyph PNGs (gitignored, from img2glyph)
-    expected.ufo/           # Hand-corrected outlines (ground truth)
-    pipeline-output.ufo/    # Latest pipeline output (gitignored)
-    comparison/             # Visual diffs (gitignored, generated)
-    results.tsv             # Experiment history
+    input.png            # Scanned specimen image
+    config.json          # Font metrics + segmentation settings
+    unicode-labels.json  # Which glyph is which character
+    input-glyphs/        # Cropped glyph PNGs (gitignored, regenerated)
+    output.ufo/          # The font — green=corrected, red=pipeline
+    comparison/          # Autoresearch diffs (gitignored)
 ```
 
-To create a reference set:
-
-1. Segment and label a specimen (the `input/` directory)
-2. Run the pipeline to get `pipeline-output.ufo`
-3. Open in a font editor, correct the outlines, save as `expected.ufo`
-
-Even 10 corrected glyphs is enough to start the loop. See [`references/README.md`](references/README.md) for details.
-
-### Running the loop
-
-Point any LLM coding agent at `autoresearch/program.md`:
-
-```bash
-# Run one experiment with specific parameters
-./autoresearch/run_scan_experiment.sh --alphamax 0.9 --accuracy 6.0
-
-# Or let an LLM drive it overnight (~100 experiments)
-# The LLM reads program.md, makes changes, runs the script, keeps or reverts
-```
-
-The script outputs parseable results:
-```
-mean_iou: 72.45%
-mean_score: 0.634
-glyphs_ok: 26
-glyphs_failed: 0
-```
-
-### What the LLM can change
-
-Code in all three repos (img2bez, img2glyph, img2ufo):
-- Thresholding and hole filling (`img2bez/src/bitmap.rs`)
-- Curve fitting constants (`img2bez/src/vectorize/curve.rs`)
-- Segmentation and masking (`img2glyph/src/segment.rs`)
-- Pipeline config and defaults (`img2ufo/src/ufo_builder.rs`)
-
----
-
-## Project structure
-
-```
-img2ufo/
-├── src/
-│   ├── main.rs            # CLI entry point
-│   ├── pipeline.rs        # Pipeline orchestration
-│   ├── ufo_builder.rs     # Tracing + UFO assembly
-│   └── manifest.rs        # img2glyph manifest deserialization
-├── autoresearch/
-│   ├── program.md         # LLM instructions for the experiment loop
-│   └── run_scan_experiment.sh
-├── references/
-│   ├── README.md
-│   └── specimen-001/      # First reference set
-├── context/
-│   └── scan-quality-strategy.md
-├── test.png               # Test specimen image
-└── Cargo.toml
-```
+9 specimen datasets are included. See [`references/README.md`](references/README.md) for setup instructions.
 
 ---
 
@@ -228,6 +200,7 @@ img2ufo/
 
 - [img2glyph](https://github.com/eliheuer/img2glyph) — glyph segmentation and labeling
 - [img2bez](https://github.com/eliheuer/img2bez) — bitmap to bezier tracing
+- [Runebender](https://github.com/linebender/runebender) — font editor (background image support for tracing)
 - [comfyfont](https://github.com/eliheuer/comfyfont) — ComfyUI font editing nodes
 
 ---

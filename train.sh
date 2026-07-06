@@ -32,7 +32,7 @@ shift
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rebuild) REBUILD=true ;;
-        --open)    OPEN=true; REBUILD=true ;;
+        --open)    OPEN=true ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
     shift
@@ -49,7 +49,7 @@ if [ ! -d "$REF_DIR" ]; then
 fi
 
 SOURCE="$REF_DIR/input.png"
-INPUT_DIR="$REF_DIR/input"
+INPUT_DIR="$REF_DIR/input-glyphs"
 ASSIGNMENTS="$REF_DIR/unicode-labels.json"
 METADATA="$REF_DIR/config.json"
 UFO="$REF_DIR/output.ufo"
@@ -103,19 +103,24 @@ fi
 
 # ── Step 3: Build UFO ────────────────────────────────────────────────────────
 
-if [ ! -f "$INPUT_DIR/manifest.json" ]; then
-    echo "ERROR: No manifest.json in $INPUT_DIR"
-    echo "Run without --rebuild first: ./train.sh $SPECIMEN"
-    exit 1
-fi
+# Skip build if --open and UFO already exists (don't overwrite edits).
+if [ "$OPEN" = true ] && [ -d "$UFO" ] && [ "$REBUILD" = false ]; then
+    echo "=== UFO exists, opening without rebuild ==="
+else
+    if [ ! -f "$INPUT_DIR/manifest.json" ]; then
+        echo "ERROR: No manifest.json in $INPUT_DIR"
+        echo "Run without --rebuild first: ./train.sh $SPECIMEN"
+        exit 1
+    fi
 
-echo "=== Building UFO ==="
-cargo run --quiet -- \
-    -i "${SOURCE:-/dev/null}" \
-    -o "$UFO" \
-    --glyph-dir "$INPUT_DIR" \
-    --min-area "$MIN_AREA" \
-    --family-name "$FAMILY_NAME"
+    echo "=== Building UFO ==="
+    cargo run --release --quiet -- \
+        -i "${SOURCE:-/dev/null}" \
+        -o "$UFO" \
+        --glyph-dir "$INPUT_DIR" \
+        --min-area "$MIN_AREA" \
+        --family-name "$FAMILY_NAME"
+fi
 
 # Count colors
 python3 -c "
