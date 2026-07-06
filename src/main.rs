@@ -15,12 +15,18 @@ use std::path::PathBuf;
 
 /// Convert a type specimen image to a Google Fonts-compliant UFO font source.
 ///
+/// Simplest use: `img2ufo scan.png` — the UFO (plus completion worklist,
+/// compiled TTF, and fontspector report) lands next to the image. If a
+/// manifest.json / labels.json sit beside the image (an img2glyph output
+/// directory), they are picked up automatically and segmentation is skipped.
+///
 /// Pipeline:
 ///   1. Segment glyphs from the input image (img2glyph)
 ///   2. Label glyph crops with codepoints (--labels)
 ///   3. Trace each glyph PNG to bezier outlines (img2bez)
-///   4. Assemble a UFO with GF-compliant metadata (+ optional repo scaffold)
-///   5. Compile (fontc/fontmake) and gate on fontspector's googlefonts profile
+///   4. Assemble a UFO with GF-compliant metadata, then auto-compose the
+///      missing Latin Core accented glyphs (+ optional repo scaffold)
+///   5. Compile (fontc) and gate on fontspector's googlefonts profile
 ///
 /// Use --glyph-dir to save or reuse intermediate glyph PNGs and manifest.json.
 /// If the directory already contains a manifest.json, segmentation is skipped.
@@ -28,10 +34,15 @@ use std::path::PathBuf;
 #[command(name = "img2ufo", version, about)]
 struct Args {
     /// Input type specimen image (PNG, JPEG, or BMP)
-    #[arg(short, long)]
-    input: PathBuf,
+    #[arg(value_name = "IMAGE", required_unless_present = "input")]
+    image: Option<PathBuf>,
+
+    /// Input image (legacy flag form; same as the positional IMAGE)
+    #[arg(short, long, conflicts_with = "image")]
+    input: Option<PathBuf>,
 
     /// Output UFO directory path (e.g. MyFont-Regular.ufo).
+    /// Default: <image dir>/<Family>-<Style>.ufo.
     /// Not needed with --emit-repo (the UFO goes into <repo>/sources/).
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -48,9 +59,11 @@ struct Args {
     #[arg(long)]
     labels: Option<PathBuf>,
 
-    /// Family name for the font
-    #[arg(long, default_value = "Untitled Revival")]
-    family: String,
+    /// Family name for the font.
+    /// Default: derived from the image's directory name (e.g.
+    /// scans/garamond-poster/scan.png -> "Garamond Poster").
+    #[arg(long, alias = "family-name")]
+    family: Option<String>,
 
     /// Style name (e.g. Regular, Bold, Italic)
     #[arg(long, default_value = "Regular")]
@@ -121,6 +134,34 @@ struct Args {
     verbose: bool,
 }
 
+/// Default family name from the specimen's directory (fallback: file stem):
+/// non-alphanumerics become spaces, words are title-cased.
+fn derive_family(input: &std::path::Path) -> String {
+    let source = input
+        .parent()
+        .and_then(|p| p.file_name())
+        .or_else(|| input.file_stem())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = source
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if name.is_empty() {
+        "Untitled Revival".to_string()
+    } else {
+        name
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -129,12 +170,18 @@ fn main() -> Result<()> {
         .parse()
         .map_err(|e: String| anyhow::anyhow!(e))?;
 
+    let input = args
+        .image
+        .or(args.input)
+        .expect("clap enforces IMAGE or --input");
+    let family = args.family.unwrap_or_else(|| derive_family(&input));
+
     let mut config = pipeline::PipelineConfig {
-        input: args.input,
+        input,
         output: args.output,
         glyph_dir: args.glyph_dir,
         labels: args.labels,
-        family: args.family,
+        family,
         style: args.style,
         designer: args.designer,
         git_url: args.git_url,

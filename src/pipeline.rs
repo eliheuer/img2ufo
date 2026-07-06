@@ -90,7 +90,12 @@ pub fn run(config: PipelineConfig) -> Result<()> {
     let ufo_path: PathBuf = match (&config.emit_repo, &config.output) {
         (Some(repo), _) => repo.join("sources").join(format!("{font_stem}.ufo")),
         (None, Some(out)) => out.clone(),
-        (None, None) => bail!("Either --output or --emit-repo is required"),
+        // Default: the UFO lands next to the input image.
+        (None, None) => config
+            .input
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!("{font_stem}.ufo")),
     };
     if let Some(parent) = ufo_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -104,6 +109,19 @@ pub fn run(config: PipelineConfig) -> Result<()> {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
             dir.clone()
+        }
+        // Auto-detect: a manifest.json beside the image means the image
+        // lives in an img2glyph output directory — reuse it.
+        None if config
+            .input
+            .parent()
+            .is_some_and(|p| p.join("manifest.json").exists()) =>
+        {
+            let dir = config.input.parent().unwrap().to_path_buf();
+            if config.verbose {
+                eprintln!("pipeline: using {dir:?} as glyph dir (manifest.json found)");
+            }
+            dir
         }
         None => {
             _temp_dir_holder = tempfile::tempdir()?;
@@ -130,7 +148,15 @@ pub fn run(config: PipelineConfig) -> Result<()> {
     // ------------------------------------------------------------------
     let mut manifest = Manifest::load(&manifest_path)
         .with_context(|| format!("Failed to load manifest at {manifest_path:?}"))?;
-    if let Some(labels_path) = &config.labels {
+    // Auto-detect labels.json in the glyph dir when --labels is not given.
+    let labels_path = config
+        .labels
+        .clone()
+        .or_else(|| Some(glyph_dir.join("labels.json")).filter(|p| p.exists()));
+    if let Some(labels_path) = &labels_path {
+        if config.verbose {
+            eprintln!("pipeline: labels from {labels_path:?}");
+        }
         let labels = Labels::load(labels_path)
             .with_context(|| format!("Failed to load labels at {labels_path:?}"))?;
         manifest.apply_labels(&labels);
