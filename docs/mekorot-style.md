@@ -4,6 +4,30 @@
 starting representation for the Letraset scan project, and eventually
 the native encoding of the Mekorot model. Named for מקורות — "sources."
 
+## The project this serves
+
+**Mekorot the font**: Eli's unfinished Arabic/Hebrew family, missing a
+Latin in the same style. The plan (starting week of 2026-07-13): trace
+a Letraset Latin specimen in this style and merge three sources into
+one cohesive tri-script family — the first end-to-end test of the idea.
+
+- Hebrew: https://github.com/eliheuer/mekorot — local
+  `/Users/eli/GH/repos/mekorot/sources/` (Regular + ExtraBold + italics,
+  UPM 1024). Measured: alef is 22/22 smooth with 19/22 tangents already
+  axis-aligned, but only ~2% grid-aligned — conversion is snapping plus
+  a per-glyph decision on the few diagonal tangents.
+- Arabic: https://github.com/eliheuer/open-gate-naskh — local
+  `/Users/eli/GH/repos/open-gate-naskh/sources/` (Regular, UPM 1024,
+  heavy use of components; needs a structural audit before conversion).
+- Latin: does not exist in the style yet (the current Latin in the
+  Hebrew repo is cornered straight-line construction — replace, don't
+  patch). Source: a Letraset specimen of Eli's choosing from
+  `/Users/eli/Desktop/letraset/`, traced in this style.
+
+The style spec below is therefore also the HARMONIZATION CONTRACT
+across the three scripts: same grid, same invariant, same point
+grammar, one family.
+
 ## The invariant
 
 Every on-curve point is **smooth** with an **exactly horizontal or
