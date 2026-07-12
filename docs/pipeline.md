@@ -22,7 +22,10 @@ First target corpus: ~/Desktop/letraset/ sheets.
    manifest drives the RTL start rule + glyph naming).
 4. **Assemble** — img2ufo core: norad UFO build; fontinfo (family
    name, OFL fields per gf-guide), vertical metrics strategy from
-   the gf-guide checklist (docs/gf-compliance-checklist.md), glyph
+   the gf-guide checklist (docs/gf-compliance-checklist.md).
+   PLACEMENT VALIDATED 2026-07-12 (docs/placement.md): uniform scale
+   + per-row baseline voting from the manifest puts every trace on
+   the baseline with overshoots preserved, glyph
    set completion report (GF Latin Core coverage vs what the
    specimen provided), spacing v0 (sidebearings from ink bounds +
    corpus-calibrated defaults; learned spacing head later), kerning
