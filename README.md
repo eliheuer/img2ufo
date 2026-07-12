@@ -8,6 +8,10 @@ This tool is the glue between two other Rust tools:
 
 img2ufo orchestrates the full pipeline: one image in, one UFO out.
 
+**Agents**: start with [CLAUDE.md](CLAUDE.md) — the validated
+image-to-placed-font recipe and the pitfall list. Placement details:
+[docs/placement.md](docs/placement.md).
+
 ---
 
 ## Install
