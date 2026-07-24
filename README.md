@@ -1,6 +1,6 @@
 # img2ufo
 
-Convert a AI generated or scanned type specimen image into a Google Fonts-compliant [UFO](https://unifiedfontobject.org/) font source.
+Convert an AI generated or scanned type specimen image into a Google Fonts-compliant [UFO](https://unifiedfontobject.org/) font source.
 
 This tool is the glue between two other Rust tools:
 - [img2glyph](https://github.com/eliheuer/img2glyph) — segments a type specimen into individual glyph PNGs
